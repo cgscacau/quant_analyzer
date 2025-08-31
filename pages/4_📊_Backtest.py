@@ -10,6 +10,64 @@ from core.backtest import run_sma_cross, run_rsi_meanrev
 st.set_page_config(page_title="Backtest", page_icon="📊", layout="wide")
 app_header("📊 Backtest", "Comparação rápida de estratégias por ativo")
 
+# (opcional) obtém um universo de tickers para popular o multiselect.
+def _load_watchlists_safe():
+    try:
+        from core.data import load_watchlists as _lw  # usa o projeto, se existir
+        return _lw()
+    except Exception:
+        # fallback mínimo – ajuste se quiser
+        return {
+            "BR_STOCKS": ["PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA", "BBAS3.SA"],
+            "US_STOCKS": ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META"],
+            "CRYPTO":    ["BTC-USD", "ETH-USD", "SOL-USD"],
+        }
+
+def _flatten_unique(lst_of_lists):
+    out = []
+    seen = set()
+    for lst in lst_of_lists:
+        for x in lst:
+            if x not in seen:
+                seen.add(x)
+                out.append(x)
+    return out
+
+_watch = _load_watchlists_safe()
+_universe = _flatten_unique(_watch.values())  # lista única para o multiselect
+
+# 1) Lê a seleção que veio do Screener (se houver)
+_screener_sel = st.session_state.get("screener_selected", [])
+
+# 2) Toggle para usar (ou não) a seleção do Screener
+use_screener = st.toggle(
+    "Usar seleção do Screener (se houver)",
+    value=bool(_screener_sel),  # liga por padrão se tiver algo salvo
+    key="use_screener_toggle",
+)
+
+# 3) Multiselect para edição manual (fica desabilitado quando o toggle está ON)
+symbols_manual = st.multiselect(
+    "Escolha os ativos (caso não use a seleção do Screener)",
+    options=_universe,
+    default=(_screener_sel or ["AAPL"]),  # pré-preenche com a seleção do screener se existir
+    disabled=use_screener,
+)
+
+# 4) Lista efetiva de símbolos que o seu backtest vai usar
+symbols = _screener_sel if (use_screener and _screener_sel) else symbols_manual
+
+# 5) Segurança: se a lista estiver vazia, avisa e interrompe cedo
+if not symbols:
+    st.info("Nenhum ativo selecionado. Selecione no Screener e clique em **Usar seleção no Backtest** ou escolha manualmente acima.")
+    st.stop()
+
+# (opcional) debug rápido
+with st.expander("Debug seleção", expanded=False):
+    st.write("screener_selected (session):", _screener_sel)
+    st.write("use_screener:", use_screener)
+    st.write("symbols (efetivos):", symbols)
+
 
 def inject_dark_theme():
     import streamlit as st
