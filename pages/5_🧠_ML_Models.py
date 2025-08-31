@@ -489,7 +489,6 @@ for tab, sym in zip(tabs, equities.keys()):
 # ✅ Resumo e plano tático (experimental)
 # ============================================================
 # === BLOCO: Resumo e plano tático (substitua o atual) =======================
-import numpy as np
 
 with st.expander(f"📌 {sym} — Situação e plano"):
     # 1) Pegar a última probabilidade (se existir)
