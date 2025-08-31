@@ -1,81 +1,87 @@
 # pages/3_🔎_Screener.py
-from core.data import load_watchlists, download_bulk   # <<< importante: usar load_watchlists
 from __future__ import annotations
-import pandas as pd
-import streamlit as st
-import numpy as np
-from core.ui import app_header, ticker_selector
-from core.data import load_watchlists, download_bulk
-from core.indicators import sma, rsi
-# --- Watchlists (fonte única + debug) ---------------------------------------
-# --- Watchlists + classe ----------------------------------------------------
-# ----------------------------------------------------------------------
-# 1) Carrega as watchlists da origem atual (arquivo ou override da Settings)
-# ----------------------------------------------------------------------
-wl = load_watchlists()  # respeita override (memória) se existir
 
-# Mapa de rótulos (UI) -> chaves do dicionário de watchlists
+import streamlit as st
+import pandas as pd
+
+from core.data import load_watchlists, download_bulk
+
+# Mapa de rótulos (UI) -> chave no dicionário de watchlists
 CLASS_MAP = {
-    "Brasil (Ações B3)"      : "BR_STOCKS",
-    "Brasil (FIIs)"          : "BR_FIIS",
-    "Brasil — Dividendos"    : "BR_DIVIDEND",
-    "Brasil — Blue Chips"    : "BR_BLUE_CHIPS",
-    "Brasil — Small Caps"    : "BR_SMALL_CAPS",
-    "EUA (Ações US)"         : "US_STOCKS",
-    "EUA — Dividendos"       : "US_DIVIDEND",
-    "EUA — Blue Chips"       : "US_BLUE_CHIPS",
-    "EUA — Small Caps"       : "US_SMALL_CAPS",
-    "Criptos"                : "CRYPTO",
+    "Brasil (Ações B3)": "BR_STOCKS",
+    "Brasil (FIIs)": "BR_FIIS",
+    "Brasil - Dividendos": "BR_DIVIDEND",
+    "Brasil - Blue Chips": "BR_BLUE_CHIPS",
+    "Brasil - Small Caps": "BR_SMALL_CAPS",
+    "EUA (Ações US)": "US_STOCKS",
+    "EUA - Dividendos": "US_DIVIDEND",
+    "EUA - Blue Chips": "US_BLUE_CHIPS",
+    "EUA - Small Caps": "US_SMALL_CAPS",
+    "Criptos": "CRYPTO",
 }
 
-# ----------------------------------------------------------------------
-# 2) UI de seleção da classe (sidebar)
-# ----------------------------------------------------------------------
-with st.sidebar:
-    st.markdown("### Classe")
-    class_label = st.selectbox(
-        "Classe", list(CLASS_MAP.keys()), index=0, label_visibility="collapsed"
-    )
 
-key = CLASS_MAP[class_label]
-symbols = wl.get(key, [])
-st.sidebar.caption(f"**Total na classe:** {len(symbols)}")
+def _ui_sidebar(wl: dict) -> tuple[list[str], str, str, str]:
+    """Constroi a UI lateral e retorna (symbols, class_label, period, interval)."""
+    with st.sidebar:
+        st.markdown("### Classe")
+        label = st.selectbox("Classe", list(CLASS_MAP.keys()), index=0, label_visibility="collapsed")
+        key = CLASS_MAP[label]
+        symbols = wl.get(key, [])
+        st.caption(f"Total na classe: **{len(symbols)}**")
 
-# Se não houver símbolos, avisa e sai
-if not symbols:
-    st.warning("Nenhum ativo nesta classe. Atualize as watchlists na **Settings** ou relaxe os filtros.")
-    st.stop()
+        st.markdown("### Período e intervalo")
+        period = st.selectbox("Período", ["6mo", "1y", "2y", "5y"], index=0)
+        interval = st.selectbox("Intervalo", ["1d", "1wk", "1mo"], index=0)
 
-# ----------------------------------------------------------------------
-# 3) Parâmetros de período/intervalo e quebra de cache por versão
-# ----------------------------------------------------------------------
-with st.sidebar:
-    period   = st.selectbox("Período",   ["6mo","1y","2y","5y","10y"], index=0)
-    interval = st.selectbox("Intervalo", ["1d","1wk","1mo"], index=0)
+    return symbols, label, period, interval
 
-# versão do override para quebrar caches quando você atualizar na Settings
-ver = int(st.session_state.get("watchlists_version", 0))
 
-# ----------------------------------------------------------------------
-# 4) Baixa os dados respeitando a versão (cache-busting)
-# ----------------------------------------------------------------------
-# OBS: certifique-se de que download_bulk aceite ver como parâmetro opcional!
-data = download_bulk(symbols, period=period, interval=interval, ver=ver)
+def _build_table(data: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Gera uma tabela resumida a partir do dict de DataFrames."""
+    rows: list[dict] = []
+    for s, df in data.items():
+        if df is None or df.empty or "Close" not in df.columns:
+            continue
+        close = float(df["Close"].iloc[-1])
+        d1 = float(df["Close"].pct_change().iloc[-1] * 100) if len(df) > 1 else 0.0
+        rows.append({"Symbol": s, "Price": close, "D1%": d1})
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out = out.sort_values("Symbol")
+    return out
 
-# Monta uma tabela simples (exemplo)
-rows = []
-for s, df in data.items():
-    if df is None or df.empty or "Close" not in df.columns:
-        continue
-    last = df["Close"].iloc[-1]
-    r1d  = df["Close"].pct_change().iloc[-1] * 100 if len(df) > 1 else 0.0
-    rows.append({"Symbol": s, "Price": last, "D1%": r1d})
 
-if not rows:
-    st.info("Sem dados suficientes para exibir. Tente outro período/intervalo.")
-else:
-    out = pd.DataFrame(rows).sort_values("Symbol")
-    st.dataframe(out, use_container_width=True, hide_index=True)
+def main() -> None:
+    st.title("Screener")
+
+    # 1) Carrega watchlists (origem: arquivo ou override salvo na Settings)
+    wl = load_watchlists()
+
+    # 2) UI lateral
+    symbols, class_label, period, interval = _ui_sidebar(wl)
+
+    if not symbols:
+        st.warning("Nenhum ativo nesta classe. Atualize as watchlists em Settings ou reduza filtros.")
+        st.stop()
+
+    # 3) Quebra de cache quando override é atualizado na Settings
+    ver = int(st.session_state.get("watchlists_version", 0))
+
+    # 4) Baixa dados em lote
+    st.caption(f"Processando {len(symbols)} ativos desta classe...")
+    data = download_bulk(symbols, period=period, interval=interval, ver=ver)
+
+    # 5) Tabela simples
+    table = _build_table(data)
+    if table.empty:
+        st.info("Sem dados suficientes para exibir. Tente outro período/intervalo.")
+    else:
+        st.dataframe(table, use_container_width=True, hide_index=True)
+
+
+if __name__ == "__main__":
+    main()
 
 
 
