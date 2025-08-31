@@ -1,217 +1,404 @@
-# pages/7_💼_Portfolio.py
-import streamlit as st
+# >>> DEVE SER A PRIMEIRA LINHA ÚTIL DO ARQUIVO <<<
+from __future__ import annotations
+
+import math
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-from core.ui import app_header
-from core.data import load_watchlists, download_bulk
-from core.portfolio import mc_frontier, build_equal_weight_returns, ann_stats, extract_weights
+import streamlit as st
 
-st.set_page_config(page_title="Portfolio", page_icon="💼", layout="wide")
-@st.cache_data(ttl=600)
-def _cached_returns(symbols_tuple, period, interval):
-    from core.data import download_bulk
-    data = download_bulk(list(symbols_tuple), period=period, interval=interval)
-    rets = {s: df["Close"].pct_change().dropna()
-            for s, df in data.items() if (df is not None and not df.empty and "Close" in df.columns)}
-    return pd.DataFrame(rets).dropna()
+# Plotly para gráficos
+import plotly.express as px
+import plotly.graph_objs as go
 
-app_header("💼 Portfolio", "Fronteira eficiente (Monte Carlo), Equal-Weight e pesos ótimos")
-
-# ------------- Tema escuro opcional (leve) -------------
-def inject_dark():
-    st.markdown("""
-    <style>
-      :root{ --bg:#0b0f16; --panel:#121826; --text:#e8edf7; --muted:#a3adc2; --border:#1f2a44; --accent:#38bdf8; }
-      .stApp{ background:var(--bg); color:var(--text); }
-      [data-testid="stMarkdownContainer"], label, p, span, h1,h2,h3,h4,h5{ color:var(--text)!important; }
-      [data-baseweb="select"]>div{ background:var(--panel)!important; border-color:var(--border)!important; }
-      [data-testid="stMetric"]{ background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:12px; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# ------------- Seleção de ativos -------------
-watch = load_watchlists()
-all_syms = sorted(set(watch["BR_STOCKS"] + watch["US_STOCKS"] + watch["CRYPTO"]))
-
-# --- seleção integrada com Screener ---
-sel_from_screener = st.session_state.get("screener_selection", [])
-use_sel = st.toggle("Usar seleção do Screener (se houver)", value=bool(sel_from_screener))
-sel_count = len(sel_from_screener)
-
-# sugestão de default caso precise escolher manualmente
-suggest = ["AAPL","MSFT","NVDA"]
-default_list = [s for s in suggest if s in all_syms] or all_syms[:3]
-
-if use_sel and sel_count >= 2:
-    symbols = sel_from_screener
-    preview = ", ".join(symbols[:8]) + ("…" if sel_count > 8 else "")
-    st.caption(f"Usando **{sel_count}** ativos do Screener: {preview}")
-else:
-    if use_sel and sel_count < 2:
-        st.warning("A seleção do Screener tem menos de **2** ativos. Escolha abaixo ou volte ao Screener e marque mais.")
-    symbols = st.multiselect(
-        "Ativos para montar o portfólio",
-        options=all_syms,
-        default=default_list
-    )
+# yfinance é opcional – se não houver, a página continua mostrando instruções
+try:
+    import yfinance as yf  # type: ignore
+except Exception:
+    yf = None  # type: ignore
 
 
-col1, col2, col3, col4 = st.columns(4)
-period   = col1.selectbox("Período", ["6mo","1y","2y","5y"], index=1)
-interval = col2.selectbox("Intervalo", ["1d","1wk"], index=0)
-rf_pct   = col3.number_input("Taxa livre de risco anual (%)", min_value=-5.0, value=6.0, step=0.5)
-dark     = col4.toggle("Tema escuro", value=True)
-if dark: inject_dark()
-
-col5, col6, col7 = st.columns(3)
-n_sims  = int(col5.slider("Simulações (Monte Carlo)", 2000, 50000, 15000, step=1000))
-w_max   = float(col6.slider("Peso máximo por ativo", 0.10, 1.00, 0.35, step=0.05))
-seed    = int(col7.number_input("Semente (reprodutibilidade)", value=42, step=1))
-
-if len(symbols) < 2:
-    st.warning("Selecione pelo menos **2** ativos.")
-    st.stop()
-
-# ------------- Download & retornos -------------
-bulk = download_bulk(symbols, period=period, interval=interval)
-rets = {}
-for sym, df in bulk.items():
-    if not df.empty and "Close" in df.columns:
-        rets[sym] = df["Close"].pct_change().dropna()
-# ------------- Download & retornos (cacheado) -------------
-with st.spinner("🔄 Baixando dados e calculando retornos..."):
-    rets_df = _cached_returns(tuple(symbols), period, interval)
-
-if rets_df.shape[1] < 2 or rets_df.empty:
-    st.error("Retornos insuficientes para montar o portfólio nesse período/intervalo.")
-    st.stop()
-
-# ------------- Equal-Weight e Fronteira (rápidos) -------------
-with st.spinner(f"🎲 Simulando {n_sims:,} carteiras..."):
-    eqw_ret = build_equal_weight_returns(rets_df)
-    eqw_stats = ann_stats(eqw_ret, interval, rf_annual=rf_pct/100.0)
-    front = mc_frontier(
-        rets_df, interval=interval, rf_annual=rf_pct/100.0,
-        n_sims=n_sims, w_max=w_max, seed=seed
-    )
+# ================================================================
+# Utilidades
+# ================================================================
+def fmt_pct(x: float | int | None) -> str:
+    if x is None or (isinstance(x, float) and not math.isfinite(x)):
+        return "N/A"
+    v = float(x)
+    if abs(v) <= 1.5:
+        return f"{v*100:.2f}%"
+    return f"{v:.2f}%"
 
 
-# ------------- Equal-Weight e Fronteira -------------
-eqw_ret = build_equal_weight_returns(rets_df)
-eqw_stats = ann_stats(eqw_ret, interval, rf_annual=rf_pct/100.0)
+def fmt_num(x: float | int | None, ndigits: int = 2) -> str:
+    if x is None or (isinstance(x, float) and not math.isfinite(x)):
+        return "N/A"
+    return f"{float(x):.{ndigits}f}"
 
-front = mc_frontier(
-    rets_df, interval=interval, rf_annual=rf_pct/100.0,
-    n_sims=n_sims, w_max=w_max, seed=seed
+
+def ann_stats(returns: pd.Series | pd.DataFrame, periods_per_year: int = 252) -> tuple[float, float]:
+    """
+    Anualiza média e desvio de retornos (diários por padrão).
+    """
+    mu = returns.mean() * periods_per_year
+    vol = returns.std(ddof=0) * (periods_per_year ** 0.5)
+    return (float(mu), float(vol))
+
+
+def max_drawdown(equity: pd.Series) -> float:
+    """
+    Max drawdown de uma curva de patrimônio.
+    """
+    if not isinstance(equity, pd.Series) or equity.empty:
+        return float("nan")
+    roll_max = equity.cummax()
+    dd = equity / roll_max - 1.0
+    return float(dd.min())
+
+
+def screener_selection() -> list[str]:
+    sel = st.session_state.get("screener_selected", None)
+    if isinstance(sel, (list, tuple)) and len(sel):
+        return [str(x) for x in sel if isinstance(x, (str, bytes))]
+    return []
+
+
+# ================================================================
+# Dados
+# ================================================================
+@st.cache_data(show_spinner=False)
+def dl_prices(symbols: tuple[str, ...], period: str, interval: str) -> dict[str, pd.DataFrame]:
+    """
+    Baixa OHLC para cada ativo.
+    Retorna um dicionário {symbol: DataFrame} (Close, etc).
+    """
+    data: dict[str, pd.DataFrame] = {}
+    if yf is None or len(symbols) == 0:
+        return data
+
+    for sym in symbols:
+        try:
+            df = yf.download(sym, period=period, interval=interval, auto_adjust=False, progress=False)  # type: ignore
+            if isinstance(df, pd.DataFrame) and len(df):
+                df = df.rename(columns=str.title)
+                if "Close" in df.columns:
+                    data[sym] = df.copy()
+        except Exception:
+            # Falha silenciosa para não travar a página
+            pass
+
+    return data
+
+
+def build_returns_dict(
+    prices_dict: dict[str, pd.DataFrame]
+) -> dict[str, pd.Series]:
+    """
+    Constrói séries de retornos para cada ativo com base em Close.
+    """
+    rets: dict[str, pd.Series] = {}
+    for sym, df in prices_dict.items():
+        if "Close" not in df.columns:
+            continue
+        sr = df["Close"].dropna().pct_change().dropna()
+        if len(sr) >= 10:
+            rets[sym] = sr
+    return rets
+
+
+def align_returns(rets_dict: dict[str, pd.Series]) -> pd.DataFrame:
+    """
+    Alinha por data as séries de retorno.
+    """
+    if not rets_dict:
+        return pd.DataFrame()
+    df = pd.concat(rets_dict.values(), axis=1, join="inner")
+    df.columns = list(rets_dict.keys())
+    df = df.dropna()
+    return df
+
+
+# ================================================================
+# Portfólio / Monte Carlo
+# ================================================================
+def random_weights(n: int, cap: float, rng: np.random.Generator) -> np.ndarray:
+    """
+    Gera pesos aleatórios (>=0, somam 1) com limite máximo por ativo (cap).
+    Usa rotina de rejeição simples.
+    """
+    if cap <= 0:
+        cap = 1.0
+    cap = float(min(1.0, max(0.01, cap)))  # clamp
+
+    for _ in range(20_000):  # limite de tentativas
+        w = rng.random(n)
+        w = w / w.sum()
+        if (w <= cap + 1e-9).all():
+            return w
+        # Tenta “empurrar” excesso para os demais
+        # (estratégia simples para aumentar taxa de aceitação)
+        over = w > cap
+        if over.any():
+            excess = float((w[over] - cap).sum())
+            w[over] = cap
+            # distribui excesso
+            under = ~over
+            if under.any():
+                w[under] += excess * (w[under] / w[under].sum())
+            # normaliza de novo
+            w = np.maximum(w, 0)
+            s = w.sum()
+            if s > 0:
+                w = w / s
+            if (w <= cap + 1e-9).all():
+                return w
+    # fallback: dirichlet normal, sem cap
+    w = rng.dirichlet(np.ones(n))
+    return w
+
+
+def portfolio_stats(weights: np.ndarray, mu_vec: np.ndarray, cov: np.ndarray, rf: float) -> tuple[float, float, float]:
+    """
+    Retorno anual, volatilidade anual, Sharpe.
+    """
+    port_mu = float(weights @ mu_vec)
+    port_vol = float(np.sqrt(weights @ cov @ weights))
+    sharpe = (port_mu - rf) / (port_vol + 1e-12)
+    return port_mu, port_vol, sharpe
+
+
+def build_portfolios(
+    rets: pd.DataFrame,
+    rf: float,
+    n_sims: int = 10_000,
+    w_cap: float = 0.35,
+    seed: int = 42,
+) -> tuple[pd.DataFrame, dict[str, np.ndarray]]:
+    """
+    Monte Carlo de portfólios com cap por ativo.
+    Retorna:
+      df_mc (mu, vol, sharpe, pesos...) e dict com carteiras especiais.
+    """
+    if rets.empty or rets.shape[1] < 2:
+        return pd.DataFrame(), {}
+
+    periods_per_year = 252 if rets.index.freq is None else None  # anualização padrão
+    mu_vec, _ = ann_stats(rets, periods_per_year=252)
+    mu_vec = rets.mean().values * 252  # vetor
+    cov = rets.cov().values * 252
+
+    rng = np.random.default_rng(seed)
+    n_assets = rets.shape[1]
+    columns = ["mu", "vol", "sharpe"] + [f"w_{c}" for c in rets.columns]
+    out = np.empty((n_sims, 3 + n_assets), dtype=float)
+
+    for i in range(n_sims):
+        w = random_weights(n_assets, w_cap, rng)
+        mu, vol, sh = portfolio_stats(w, mu_vec, cov, rf)
+        out[i, 0] = mu
+        out[i, 1] = vol
+        out[i, 2] = sh
+        out[i, 3:] = w
+
+    df_mc = pd.DataFrame(out, columns=columns)
+
+    # Equal-Weight
+    w_eq = np.ones(n_assets) / n_assets
+    mu_eq, vol_eq, sh_eq = portfolio_stats(w_eq, mu_vec, cov, rf)
+
+    # Máx. Sharpe
+    best = df_mc.iloc[df_mc["sharpe"].idxmax()]
+    w_best = best[3:].values
+
+    # “Mesmo risco do Máx. Sharpe” → procura portfólio com vol próximo
+    target_vol = float(best["vol"])
+    df_close = df_mc.iloc[(df_mc["vol"] - target_vol).abs().argsort()[:200]]
+    # dentre os mais próximos, pega o de maior retorno (proxy para “min risk” nesse universo)
+    w_bal = df_close.iloc[df_close["mu"].idxmax()][3:].values
+
+    special = {
+        "Equal-Weight": w_eq,
+        "Max Sharpe": w_best,
+        "Same Risk (Max Sharpe)": w_bal,
+        "__mu_vec__": mu_vec,
+        "__cov__": cov,
+        "__cols__": rets.columns.to_list(),
+    }
+    return df_mc, special
+
+
+def equity_curve(rets: pd.DataFrame, weights: np.ndarray) -> pd.Series:
+    """
+    Curva patrimonial (base 1.0).
+    """
+    pr = (rets @ weights).fillna(0)
+    eq = (1 + pr).cumprod()
+    return eq
+
+
+# ================================================================
+# Página
+# ================================================================
+st.set_page_config(page_title="Portfolio (Monte Carlo)", page_icon="💰", layout="wide")
+st.title("Portfolio (Monte Carlo)")
+
+# ----------------- Seleção de Ativos -----------------
+use_screener = st.toggle("Usar seleção do Screener (se houver)", value=True)
+
+warn = st.container()
+symbols = screener_selection() if use_screener else []
+
+if not symbols:
+    warn.info("A seleção do Screener tem menos de 2 ativos. Escolha abaixo ou volte ao Screener e marque mais.", icon="ℹ️")
+
+all_input = st.multiselect(
+    "Ativos para montar o portfólio",
+    options=symbols if symbols else ["AAPL", "MSFT", "NVDA", "AVGO", "PETR4.SA", "VALE3.SA"],
+    default=symbols if len(symbols) >= 2 else ["AAPL", "MSFT", "NVDA"],
 )
 
-# Portfólios de interesse
-best_row = front.iloc[front["sharpe"].idxmax()]
-minv_row = front.iloc[front["vol_ann"].idxmin()]
-names = rets_df.columns.tolist()
-w_best = extract_weights(best_row, names)
-w_minv = extract_weights(minv_row, names)
+c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+with c1:
+    period = st.selectbox("Período", ["6mo", "1y", "2y", "3y"], index=1)
+with c2:
+    interval = st.selectbox("Intervalo", ["1d", "1wk"], index=0)
+with c3:
+    rf_pct = st.number_input("Taxa livre de risco anual (%)", value=6.0, step=0.25, min_value=0.0)
+    rf = rf_pct / 100.0
+with c4:
+    dark = st.toggle("Tema escuro", value=True)
 
-# ------------- KPIs rápidos -------------
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Equal-Weight (CAGR)", f"{eqw_stats['cagr']*100:,.2f}%")
-c2.metric("Equal-Weight (Sharpe)", f"{eqw_stats['sharpe']:.2f}")
-c3.metric("Máx. Sharpe (ret/vol)", f"{best_row['ret_ann']*100:,.2f}% / {best_row['vol_ann']*100:,.2f}%")
-c4.metric("Mín. Vol (vol)", f"{minv_row['vol_ann']*100:,.2f}%")
+c5, c6, c7 = st.columns([1, 1, 1])
+with c5:
+    n_sims = int(st.slider("Simulações (Monte Carlo)", 2_000, 50_000, 15_000, step=1_000))
+with c6:
+    w_cap = float(st.slider("Peso máximo por ativo", 0.05, 1.0, 0.35, step=0.01))
+with c7:
+    seed = int(st.number_input("Semente (reprodutibilidade)", value=42, step=1, min_value=0))
 
-st.divider()
+if len(all_input) < 2:
+    st.stop()
 
-# ------------- Scatter: Fronteira -------------
-fig = go.Figure()
-fig.add_trace(go.Scatter(
-    x=front["vol_ann"]*100, y=front["ret_ann"]*100,
-    mode="markers", name="Portfólios (MC)",
-    marker=dict(size=5, color=front["sharpe"], colorscale="Viridis", showscale=True, colorbar=dict(title="Sharpe"))
-))
-fig.add_trace(go.Scatter(
-    x=[eqw_stats["vol_ann"]*100], y=[eqw_stats["ret_ann"]*100],
-    mode="markers+text", name="Equal-Weight",
-    marker=dict(size=12, symbol="diamond", line=dict(width=1, color="#333")),
-    text=["EW"], textposition="top center"
-))
-fig.add_trace(go.Scatter(
-    x=[best_row["vol_ann"]*100], y=[best_row["ret_ann"]*100],
-    mode="markers+text", name="Máx. Sharpe",
-    marker=dict(size=12, symbol="star", line=dict(width=1, color="#333")),
-    text=["MS"], textposition="bottom center"
-))
-fig.add_trace(go.Scatter(
-    x=[minv_row["vol_ann"]*100], y=[minv_row["ret_ann"]*100],
-    mode="markers+text", name="Mín. Vol",
-    marker=dict(size=12, symbol="x", line=dict(width=1, color="#333")),
-    text=["MV"], textposition="bottom center"
-))
-fig.update_layout(
-    template="plotly_dark" if dark else "plotly_white",
-    title="Fronteira (retorno × volatilidade) — cor = Sharpe",
-    xaxis_title="Volatilidade anualizada (%)",
-    yaxis_title="Retorno anualizado (%)",
-    margin=dict(l=10, r=10, t=60, b=10)
+# ----------------- Dados -----------------
+data = dl_prices(tuple(all_input), period, interval)
+rets_dict = build_returns_dict(data)
+rets = align_returns(rets_dict)
+
+if rets.empty or rets.shape[1] < 2:
+    st.warning("Não foi possível obter dados suficientes para os ativos selecionados.", icon="⚠️")
+    st.stop()
+
+# ----------------- Monte Carlo -----------------
+with st.spinner("Calculando portfólios..."):
+    df_mc, special = build_portfolios(rets, rf, n_sims=n_sims, w_cap=w_cap, seed=seed)
+
+if df_mc.empty:
+    st.warning("Monte Carlo não gerou portfólios válidos. Ajuste parâmetros ou verifique os dados.", icon="⚠️")
+    st.stop()
+
+cols = special["__cols__"]  # type: ignore
+
+# ----------------- Gráfico: Fronteira / Nuvem Monte Carlo -----------------
+fig = px.scatter(
+    df_mc,
+    x="vol",
+    y="mu",
+    color="sharpe",
+    color_continuous_scale="Viridis",
+    title="Fronteira (Monte Carlo) — retorno vs risco",
+    labels={"vol": "Vol anual", "mu": "Retorno anual"},
 )
+# marca carteiras especiais
+mk = {
+    "Equal-Weight": "diamond",
+    "Max Sharpe": "star",
+    "Same Risk (Max Sharpe)": "x",
+}
+for name in ("Equal-Weight", "Max Sharpe", "Same Risk (Max Sharpe)"):
+    w = special[name]  # type: ignore
+    mu, vol, sh = portfolio_stats(w, special["__mu_vec__"], special["__cov__"], rf)  # type: ignore
+    fig.add_trace(
+        go.Scatter(
+            x=[vol],
+            y=[mu],
+            mode="markers+text",
+            marker=dict(size=12, symbol=mk.get(name, "circle"), color="red"),
+            text=[name],
+            textposition="top center",
+            name=name,
+        )
+    )
+
+fig.update_layout(template="plotly_dark" if dark else "plotly_white")
 st.plotly_chart(fig, use_container_width=True)
 
-st.divider()
+# ----------------- Tabelas e Pesos -----------------
+def portfolio_table_row(name: str, w: np.ndarray) -> dict:
+    eq = equity_curve(rets, w)
+    mu, vol, sh = ann_stats((rets @ w))
+    mu = float(mu)
+    vol = float(vol)
+    sharpe = (mu - rf) / (vol + 1e-12)
+    ddown = max_drawdown(eq)
+    return {
+        "Carteira": name,
+        "Retorno (CAGR)": mu,
+        "Vol (ann)": vol,
+        "Sharpe": sharpe,
+        "MaxDD": ddown,
+    }
 
-# ------------- Inspeção de pesos -------------
-st.subheader("Pesos dos portfólios")
-choice = st.radio("Qual portfólio inspecionar?", ["Máx. Sharpe","Mín. Vol","Equal-Weight"], horizontal=True)
+rows = []
+weights_dict: dict[str, np.ndarray] = {}
+for name in ("Equal-Weight", "Max Sharpe", "Same Risk (Max Sharpe)"):
+    w = special[name]  # type: ignore
+    weights_dict[name] = w
+    rows.append(portfolio_table_row(name, w))
 
-if choice == "Máx. Sharpe":
-    w_sel = w_best
-elif choice == "Mín. Vol":
-    w_sel = w_minv
-else:
-    w_sel = pd.Series(np.ones(len(names))/len(names), index=names, dtype=float)
+df_sum = pd.DataFrame(rows)
+# formatação
+show = df_sum.copy()
+show["Retorno (CAGR)"] = show["Retorno (CAGR)"].map(fmt_pct)
+show["Vol (ann)"] = show["Vol (ann)"].map(fmt_pct)
+show["Sharpe"] = show["Sharpe"].map(lambda x: fmt_num(x, 2))
+show["MaxDD"] = show["MaxDD"].map(fmt_pct)
 
-# gráfico de barras
-bar = go.Figure()
-bar.add_trace(go.Bar(x=w_sel.index, y=(w_sel.values*100)))
-bar.update_layout(
-    template="plotly_dark" if dark else "plotly_white",
-    title=f"Pesos — {choice}",
-    yaxis_title="Peso (%)",
-    margin=dict(l=10, r=10, t=50, b=10)
-)
-st.plotly_chart(bar, use_container_width=True)
+st.subheader("Resumo das carteiras")
+st.dataframe(show, use_container_width=True, hide_index=True)
 
-# tabela e export
-weights_df = pd.DataFrame({"Symbol": w_sel.index, "Weight": w_sel.values})
-colA, colB = st.columns([3,1])
-with colA:
-    st.dataframe(weights_df.style.format({"Weight":"{:.2%}"}), use_container_width=True, height=300)
-with colB:
-    st.download_button(
-        "⬇️ Exportar pesos (CSV)",
-        data=weights_df.to_csv(index=False).encode("utf-8"),
-        file_name=f"weights_{choice.replace(' ','_').lower()}.csv",
-        mime="text/csv"
+# ----------------- Pesos / Pizza -----------------
+st.subheader("Alocações (pesos)")
+cc1, cc2, cc3 = st.columns(3)
+for i, name in enumerate(("Equal-Weight", "Max Sharpe", "Same Risk (Max Sharpe)")):
+    w = weights_dict[name]
+    df_w = pd.DataFrame({"Ativo": cols, "Peso": w})
+    figw = px.pie(df_w, names="Ativo", values="Peso", title=name)
+    figw.update_layout(template="plotly_dark" if dark else "plotly_white")
+    (cc1 if i == 0 else cc2 if i == 1 else cc3).plotly_chart(figw, use_container_width=True)
+
+# ----------------- Histórico / Curvas -----------------
+st.subheader("Curvas patrimoniais (base 1.0)")
+eq_data = []
+for name in ("Equal-Weight", "Max Sharpe", "Same Risk (Max Sharpe)"):
+    w = weights_dict[name]
+    eq = equity_curve(rets, w)
+    eq_data.append(eq.rename(name))
+eq_df = pd.concat(eq_data, axis=1)
+
+figh = px.line(eq_df, title="Equity curves", labels={"value": "Equity", "index": "Data"})
+figh.update_layout(template="plotly_dark" if dark else "plotly_white")
+st.plotly_chart(figh, use_container_width=True)
+
+# ----------------- Notas finais -----------------
+with st.expander("Como interpretar", expanded=False):
+    st.markdown(
+        """
+- **Nuvem Monte Carlo**: cada ponto é um portfólio aleatório respeitando o limite máximo por ativo  
+  (e somando 100%). Cor representa **Sharpe**.
+- **Equal-Weight**: pesos iguais; costuma ser um bom baseline.
+- **Max Sharpe**: busca melhor relação retorno/risco para a taxa livre de risco informada.
+- **Same Risk (Max Sharpe)**: dentro do universo simulado, portfólio com volatilidade mais próxima da do Max Sharpe e maior retorno.
+- As curvas e métricas são **históricas** e não garantem resultados futuros.
+        """
     )
 
-st.divider()
-
-# ------------- Top carteiras (tabelas rápidas) -------------
-topN = 10
-top_sharpe = front.nlargest(topN, "sharpe")[["ret_ann","vol_ann","sharpe"]].copy()
-top_minv  = front.nsmallest(topN, "vol_ann")[["ret_ann","vol_ann","sharpe"]].copy()
-top_sharpe[["ret_ann","vol_ann","sharpe"]] = top_sharpe[["ret_ann","vol_ann","sharpe"]].astype(float)
-top_minv[["ret_ann","vol_ann","sharpe"]]   = top_minv[["ret_ann","vol_ann","sharpe"]].astype(float)
-
-cL, cR = st.columns(2)
-with cL:
-    st.markdown("#### Top Sharpe")
-    st.dataframe(
-        top_sharpe.style.format({"ret_ann":"{:.2%}","vol_ann":"{:.2%}","sharpe":"{:.2f}"}),
-        use_container_width=True, height=300
-    )
-with cR:
-    st.markdown("#### Menor Volatilidade")
-    st.dataframe(
-        top_minv.style.format({"ret_ann":"{:.2%}","vol_ann":"{:.2%}","sharpe":"{:.2f}"}),
-        use_container_width=True, height=300
-    )
+st.caption("Conteúdo educacional; não é recomendação. Use gestão de risco.")
