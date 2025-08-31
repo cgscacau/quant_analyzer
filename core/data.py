@@ -144,15 +144,21 @@ def download_history(symbol: str, period: str = "6mo", interval: str = "1d") -> 
         return pd.DataFrame()
 
 
-def download_bulk(symbols: List[str], period: str = "6mo", interval: str = "1d") -> Dict[str, pd.DataFrame]:
-    """
-    Baixa vários ativos em sequência (usa o cache de download_history internamente).
-    Retorna dict: {symbol -> DataFrame}
-    """
-    result: Dict[str, pd.DataFrame] = {}
+
+@st.cache_data(show_spinner=False)
+def download_bulk(symbols: list[str], period: str, interval: str, ver: int = 0) -> dict[str, pd.DataFrame]:
+    """Baixa dados para vários símbolos. `ver` só serve para invalidar o cache."""
+    if not symbols:
+        return {}
+    result: dict[str, pd.DataFrame] = {}
     for s in symbols:
-        result[s] = download_history(s, period=period, interval=interval)
+        try:
+            df = yf.download(s, period=period, interval=interval, progress=False, auto_adjust=False)
+        except Exception:
+            df = pd.DataFrame()
+        result[s] = df
     return result
+
 
 
 # =============================================================================
