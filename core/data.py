@@ -1,48 +1,42 @@
 # core/data.py
-from __future__ import annotations   # tem que ser a PRIMEIRA linha do arquivo
-import pandas as pd                 # antes de qualquer uso de pd.*
+# core/data.py (trecho)
+from __future__ import annotations
 from pathlib import Path
 import json
 import streamlit as st
 
-
-
-
-# Caminho: <raiz do projeto>/data/watchlists.json
 _WL_FILE = Path(__file__).resolve().parents[1] / "data" / "watchlists.json"
 
-# Chaves esperadas (as básicas + classes adicionais)
 _WL_KEYS = [
     "BR_STOCKS", "US_STOCKS", "CRYPTO",
     "BR_FIIS", "BR_DIVIDEND", "BR_SMALL_CAPS", "BR_BLUE_CHIPS",
     "US_DIVIDEND", "US_SMALL_CAPS", "US_BLUE_CHIPS",
 ]
 
-@st.cache_data(ttl=86400)  # 24h – evita reabrir arquivo a cada chamada
-def _load_watchlists_file() -> dict:
-    """Lê o JSON do disco e garante as chaves mínimas."""
+_DEFAULT = {
+    "BR_STOCKS": ["PETR4.SA", "VALE3.SA", "ITUB4.SA"],
+    "US_STOCKS": ["AAPL", "MSFT", "NVDA"],
+    "CRYPTO":    ["BTC-USD", "ETH-USD", "SOL-USD"],
+}
+
+@st.cache_data(ttl=86400)
+def read_watchlists_file() -> dict:
+    """Lê SEMPRE do arquivo (cacheado 24h) e garante as chaves padrão."""
     try:
         data = json.loads(_WL_FILE.read_text(encoding="utf-8"))
     except Exception:
-        # fallback mínimo
-        data = {
-            "BR_STOCKS": ["PETR4.SA", "VALE3.SA", "ITUB4.SA"],
-            "US_STOCKS": ["AAPL", "MSFT", "NVDA"],
-            "CRYPTO":    ["BTC-USD", "ETH-USD", "SOL-USD"],
-        }
-    # garante as chaves esperadas sem sobrescrever o que já existe
+        data = dict(_DEFAULT)
     for k in _WL_KEYS:
         data.setdefault(k, [])
     return data
 
 def load_watchlists() -> dict:
     """
-    Fonte única para as watchlists:
-    - Se existir 'watchlists_override' na sessão, usa-o (ex.: botão em Settings).
-    - Caso contrário, usa o arquivo em disco (cacheado por 24h).
+    Retorna o override em memória (se existir), caso contrário o arquivo.
+    Use esta função nas páginas (Screener etc.).
     """
-    override = st.session_state.get("watchlists_override")
-    return override if override else _load_watchlists_file()
+    return st.session_state.get("watchlists_override", read_watchlists_file())
+
 # ----------------------------
 # Helpers de normalização OHLC
 # ----------------------------
