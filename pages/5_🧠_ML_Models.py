@@ -489,17 +489,17 @@ for tab, sym in zip(tabs, equities.keys()):
 # ✅ Resumo e plano tático (experimental)
 # ============================================================
 # ===================== BLOCO FINAL — Resumo e plano tático =====================
+# ---------- Plano tático parametrizado ----------
 import numpy as np
+import streamlit as st
 
 def _is_num(x) -> bool:
-    """True para números finitos (não-NaN)."""
     try:
         return x is not None and np.isfinite(float(x))
     except Exception:
         return False
 
 def _fmt(x, kind="num", na="N/A"):
-    """Formata com segurança."""
     if not _is_num(x):
         return na
     x = float(x)
@@ -508,84 +508,92 @@ def _fmt(x, kind="num", na="N/A"):
     if kind == "pct": return f"{x:.1%}"
     return str(x)
 
-# --- Captura segura de insumos que podem vir do pipeline anterior ---
-last_p  = float(px) if 'px' in locals() and _is_num(px) else np.nan
+def render_tactical_plan(
+    sym: str,
+    *,
+    price=None,
+    p_series=None,       # pandas Series com prob. ao longo do tempo (opcional)
+    p_up_pred=None,      # alternativa: prob. atual isolada
+    rsi=None,
+    atr=None,
+    sw_hi=None,
+    sw_lo=None,
+    fast_gt_slow=False,
+    macd_pos=False,
+    buy_threshold=0.55,
+    title_suffix=" — Resumo e plano tático",
+):
+    # --- dados seguros ---
+    last_p = float(price) if _is_num(price) else np.nan
 
-# probabilidade prevista (usa p_series[-1] se existir; senão procura p_up_pred)
-if 'p_series' in locals() and p_series is not None and len(p_series) > 0 and _is_num(p_series.iloc[-1]):
-    p_up = float(p_series.iloc[-1])
-elif 'p_up_pred' in locals() and _is_num(p_up_pred):
-    p_up = float(p_up_pred)
-else:
-    p_up = np.nan
-
-rsi      = float(rsi_val) if 'rsi_val' in locals() and _is_num(rsi_val) else np.nan
-atr      = float(atr_val) if 'atr_val' in locals() and _is_num(atr_val) else np.nan
-sw_hi_v  = float(sw_hi)   if 'sw_hi'   in locals() and _is_num(sw_hi)   else np.nan
-sw_lo_v  = float(sw_lo)   if 'sw_lo'   in locals() and _is_num(sw_lo)   else np.nan
-
-fast_slow   = bool(fast_gt_slow) if 'fast_gt_slow' in locals() else False
-macd_pos_v  = bool(macd_pos)     if 'macd_pos'     in locals() else False
-th          = float(buy_threshold) if 'buy_threshold' in locals() and _is_num(buy_threshold) else 0.55
-
-with st.expander(f"🧭 {(sym if 'sym' in locals() else 'Ativo')} — Resumo e plano tático"):
-    # --- Métricas rápidas em cards ---
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Preço",     _fmt(last_p))
-    c2.metric("Prob. alta", _fmt(p_up, "pct"))
-    c3.metric("RSI",       _fmt(rsi))
-    c4.metric("ATR",       _fmt(atr))
-
-    trend_txt = "Alta" if fast_slow else "Baixa/Fraca"
-    macd_txt  = "Positivo" if macd_pos_v else "Negativo"
-    st.caption(f"Tendência: **{trend_txt}** | MACD: **{macd_txt}** | Limiar de compra: **{_fmt(th)}**")
-
-    # --- Regras de entrada / “gatilhos” ---
-    rsi_ok   = _is_num(rsi) and 45 <= rsi <= 70
-    prob_ok  = _is_num(p_up) and p_up >= th
-    long_ok  = prob_ok and fast_slow and macd_pos_v and rsi_ok
-
-    # --- Stop/Alvo (preferência por ATR; senão usa faixa de swing) ---
-    use_atr = _is_num(atr) and atr > 0
-    stop = last_p - 1.5 * atr if use_atr else (sw_lo_v if _is_num(sw_lo_v) else np.nan)
-    tgt  = last_p + 3.0 * atr if use_atr else (sw_hi_v if _is_num(sw_hi_v) else np.nan)
-
-    rr = np.nan
-    if _is_num(stop) and _is_num(tgt) and stop < last_p < tgt:
-        risk = last_p - stop
-        if risk > 0:
-            rr = (tgt - last_p) / risk
-
-    # --- Saída tática amigável ---
-    if long_ok:
-        st.success(
-            "✅ **Cenário favorável para LONG**\n\n"
-            f"- **Entrada**: ~ **{_fmt(last_p)}**  \n"
-            f"- **Stop**: ~ **{_fmt(stop)}**  \n"
-            f"- **Alvo**: ~ **{_fmt(tgt)}**  \n"
-            f"- **R:R**: {_fmt(rr)}\n\n"
-            "Critérios: prob≥limiar, médias alinhadas (SMA rápida>lenta), MACD>0 e RSI em zona saudável."
-        )
+    if p_series is not None and len(p_series) > 0 and _is_num(p_series.iloc[-1]):
+        p_up = float(p_series.iloc[-1])
+    elif _is_num(p_up_pred):
+        p_up = float(p_up_pred)
     else:
-        faltando = []
-        if not prob_ok:   faltando.append("probabilidade acima do limiar")
-        if not fast_slow: faltando.append("SMA rápida > lenta")
-        if not macd_pos_v:faltando.append("MACD positivo")
-        if not rsi_ok:    faltando.append("RSI entre 45–70")
-        st.info(
-            "⏳ **Sem entrada LONG agora.** "
-            + ("Aguarde melhor alinhamento dos sinais." if faltando else "Sinais mistos.")
-            + (f"\n\nFaltando: {', '.join(faltando)}" if faltando else "")
+        p_up = np.nan
+
+    rsi_v   = float(rsi) if _is_num(rsi) else np.nan
+    atr_v   = float(atr) if _is_num(atr) else np.nan
+    sw_hi_v = float(sw_hi) if _is_num(sw_hi) else np.nan
+    sw_lo_v = float(sw_lo) if _is_num(sw_lo) else np.nan
+    th      = float(buy_threshold) if _is_num(buy_threshold) else 0.55
+
+    with st.expander(f"🧭 {sym} {title_suffix}", expanded=False):
+        # métricas
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Preço",     _fmt(last_p))
+        c2.metric("Prob. alta", _fmt(p_up, "pct"))
+        c3.metric("RSI",       _fmt(rsi_v))
+        c4.metric("ATR",       _fmt(atr_v))
+
+        trend_txt = "Alta" if fast_gt_slow else "Baixa/Fraca"
+        macd_txt  = "Positivo" if macd_pos else "Negativo"
+        st.caption(
+            f"Tendência: **{trend_txt}** | MACD: **{macd_txt}** | Limiar de compra: **{_fmt(th)}**"
         )
 
-    # --- Observações complementares ---
-    obs = []
-    if _is_num(sw_hi_v) and _is_num(sw_lo_v):
-        obs.append(f"Faixa de swing (20): **{_fmt(sw_lo_v)}–{_fmt(sw_hi_v)}**.")
-    if use_atr:
-        obs.append("Heurística: stop ≈ **1.5×ATR**, alvo ≈ **3×ATR**.")
-    st.caption(" • ".join(obs) if obs else "Sem estatísticas complementares disponíveis.")
-    st.caption("※ Conteúdo educacional; não é recomendação. Utilize gestão de risco.")
-# ==============================================================================
+        # gatilhos
+        rsi_ok  = _is_num(rsi_v) and 45 <= rsi_v <= 70
+        prob_ok = _is_num(p_up) and p_up >= th
+        long_ok = prob_ok and fast_gt_slow and macd_pos and rsi_ok
 
+        # stop/alvo (ATR → fallback swing)
+        use_atr = _is_num(atr_v) and atr_v > 0
+        stop = last_p - 1.5 * atr_v if use_atr else (sw_lo_v if _is_num(sw_lo_v) else np.nan)
+        tgt  = last_p + 3.0 * atr_v if use_atr else (sw_hi_v if _is_num(sw_hi_v) else np.nan)
 
+        rr = np.nan
+        if _is_num(stop) and _is_num(tgt) and stop < last_p < tgt:
+            risk = last_p - stop
+            if risk > 0:
+                rr = (tgt - last_p) / risk
+
+        if long_ok:
+            st.success(
+                "✅ **Cenário favorável para LONG**\n\n"
+                f"- **Entrada**: ~ **{_fmt(last_p)}**  \n"
+                f"- **Stop**: ~ **{_fmt(stop)}**  \n"
+                f"- **Alvo**: ~ **{_fmt(tgt)}**  \n"
+                f"- **R:R**: {_fmt(rr)}\n\n"
+                "Critérios: prob≥limiar, médias alinhadas (SMA rápida>lenta), MACD>0 e RSI em zona saudável."
+            )
+        else:
+            faltando = []
+            if not prob_ok:   faltando.append("probabilidade acima do limiar")
+            if not fast_gt_slow: faltando.append("SMA rápida > lenta")
+            if not macd_pos:  faltando.append("MACD positivo")
+            if not rsi_ok:    faltando.append("RSI entre 45–70")
+            st.info(
+                "⏳ **Sem entrada LONG agora.** Aguarde melhor alinhamento dos sinais."
+                + (f"\n\nFaltando: {', '.join(faltando)}" if faltando else "")
+            )
+
+        obs = []
+        if _is_num(sw_hi_v) and _is_num(sw_lo_v):
+            obs.append(f"Faixa de swing (20): **{_fmt(sw_lo_v)}–{_fmt(sw_hi_v)}**.")
+        if use_atr:
+            obs.append("Heurística: stop ≈ **1.5×ATR**, alvo ≈ **3×ATR**.")
+        st.caption(" • ".join(obs) if obs else "Sem estatísticas complementares disponíveis.")
+        st.caption("※ Conteúdo educacional; não é recomendação. Utilize gestão de risco.")
+# ------------------------------------------------
