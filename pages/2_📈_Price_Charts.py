@@ -1,120 +1,150 @@
 # pages/2_📈_Price_Charts.py
+# -----------------------------------------------------------------------------
+# Página INDIVIDUALIZADA (não depende de core/*)
+# - Seleção de classe/ticker com defaults
+# - Download robusto (yfinance) + normalização OHLCV 1-D (lida com MultiIndex)
+# - Fallback automático de período/intervalo quando vier vazio
+# - Indicadores locais: SMA, EMA, RSI, Bollinger Bands
+# - Candles + MAs + BBands + Volume + RSI em subplots
+# - KPIs e tabela de retornos rápidos
+# -----------------------------------------------------------------------------
 from __future__ import annotations
 
 import math
 from datetime import datetime
+from typing import Iterable
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# Helpers do app (existentes no seu projeto)
-from core.ui import app_header, data_status_badge
-from core.data import load_watchlists, download_history
-from core.indicators import sma, ema, rsi
+# yfinance é utilizado diretamente aqui
+try:
+    import yfinance as yf  # type: ignore
+except Exception:
+    yf = None  # type: ignore
 
 # =============================================================================
 # Config & Header
 # =============================================================================
 st.set_page_config(page_title="Price Charts", page_icon="📈", layout="wide")
-app_header("📈 Price Charts", "Candles + MAs + Volume + RSI")
+st.title("📈 Price Charts")
+st.caption("Candles + MAs + Volume + RSI")
 
 # =============================================================================
-# Utilidades locais (robustez contra provider / MultiIndex / estado)
+# Utilidades locais (TOTALMENTE independentes)
 # =============================================================================
-def _safe_watchlists() -> dict[str, list[str]]:
-    """Combina watchlists persistidas com as do session_state, sem KeyError."""
-    wl_file = {}
-    try:
-        wl_file = load_watchlists() or {}
-    except Exception:
-        wl_file = {}
-    wl_state = st.session_state.get("watchlists", {}) or {}
-    merged = {**wl_file, **wl_state}
-    # defaults mínimos para não ficar vazio
-    merged.setdefault("BR_STOCKS", ["PETR4.SA", "VALE3.SA", "B3SA3.SA"])
-    merged.setdefault("US_STOCKS", ["AAPL", "MSFT", "NVDA", "SPY"])
-    merged.setdefault("CRYPTO", ["BTC-USD", "ETH-USD"])
-    # classes extras podem existir (ex.: BR_DIVIDEND). Não filtramos nada aqui.
-    return merged
+def sma(s: pd.Series, n: int) -> pd.Series:
+    return pd.Series(dtype=float) if s is None else s.rolling(n, min_periods=max(1, n//2)).mean()
+
+def ema(s: pd.Series, n: int) -> pd.Series:
+    return pd.Series(dtype=float) if s is None else s.ewm(span=n, adjust=False, min_periods=max(1, n//2)).mean()
+
+def rsi(series: pd.Series, n: int = 14) -> pd.Series:
+    if series is None or len(series) < 2:
+        return pd.Series(dtype=float)
+    delta = series.diff()
+    up = delta.clip(lower=0.0)
+    dn = -delta.clip(upper=0.0)
+    ma_up = up.ewm(alpha=1/n, adjust=False).mean()
+    ma_dn = dn.ewm(alpha=1/n, adjust=False).mean()
+    rs = ma_up / (ma_dn + 1e-12)
+    out = 100 - (100 / (1 + rs))
+    return out
 
 def _normalize_ohlcv(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
-    Garante DataFrame com colunas 1-D: Open, High, Low, Close, Adj Close (se houver), Volume.
-    Trata MultiIndex e colunas duplicadas (mudanças recentes de provedores).
+    Retorna DataFrame com colunas 1-D: Open, High, Low, Close, Adj Close (se houver), Volume.
+    Aceita DataFrames simples, com duplicadas e com MultiIndex (yfinance recente).
     """
     if not isinstance(df_raw, pd.DataFrame) or df_raw.empty:
         return pd.DataFrame()
 
     df = df_raw.copy()
 
-    def _get_one(name: str) -> pd.Series | None:
+    def _one(name: str) -> pd.Series | None:
         # 1) coluna simples
         if name in df.columns and not isinstance(df[name], pd.DataFrame):
             return pd.to_numeric(df[name], errors="coerce").dropna()
-        # 2) coluna duplicada (DataFrame)
+        # 2) duplicadas (DataFrame)
         if name in df.columns and isinstance(df[name], pd.DataFrame):
             sub = df[name]
             for c in sub.columns:
                 sr = pd.to_numeric(sub[c], errors="coerce").dropna()
                 if not sr.empty:
                     return sr
-        # 3) MultiIndex (nível 0 com OHLCV)
+        # 3) MultiIndex
         if isinstance(df.columns, pd.MultiIndex):
             try:
                 if name in df.columns.get_level_values(0):
                     sub = df.xs(name, axis=1, level=0, drop_level=False)
                     first = sub.columns[0]
                     sr = pd.to_numeric(sub[first], errors="coerce").dropna()
-                    return sr
+                    if not sr.empty:
+                        return sr
             except Exception:
                 pass
         return None
 
     out = pd.DataFrame(index=df.index)
     for c in ["Open", "High", "Low", "Close", "Adj Close", "Volume"]:
-        sr = _get_one(c)
+        sr = _one(c)
         if sr is not None:
             out[c] = sr
 
     out = out.dropna(how="any")
-    # normaliza índice (sem timezone) para evitar warnings em concat/plot
     if not out.empty and getattr(out.index, "tz", None) is not None:
         out.index = out.index.tz_localize(None)
     return out.sort_index()
 
 @st.cache_data(ttl=600, show_spinner=False)
-def _cached_download(symbol: str, period: str, interval: str) -> pd.DataFrame:
-    """Wrapper cacheado: baixa e normaliza OHLCV."""
-    df = download_history(symbol, period=period, interval=interval)
+def _download(symbol: str, period: str, interval: str) -> pd.DataFrame:
+    if yf is None or not symbol:
+        return pd.DataFrame()
+    try:
+        df = yf.download(symbol, period=period, interval=interval, auto_adjust=False, progress=False)
+    except Exception:
+        return pd.DataFrame()
     return _normalize_ohlcv(df)
 
 def _pct(series: pd.Series, steps: int) -> float | None:
     """Retorno percentual aproximado em 'steps' pregões (21≈1M, 63≈3M...)."""
     if not isinstance(series, pd.Series) or len(series) <= steps:
         return None
-    a = float(series.iloc[-steps-1])
-    b = float(series.iloc[-1])
+    a = float(series.iloc[-steps-1]); b = float(series.iloc[-1])
     if not math.isfinite(a) or not math.isfinite(b) or a == 0:
         return None
     return b / a - 1.0
 
-# =============================================================================
-# Sidebar — seleção robusta
-# =============================================================================
-wls = _safe_watchlists()
-classes = list(wls.keys())
-default_class = st.session_state.get("asset_class", "US_STOCKS" if "US_STOCKS" in wls else (classes[0] if classes else "US_STOCKS"))
+def _first_non_empty(dfs: Iterable[pd.DataFrame]) -> pd.DataFrame:
+    for d in dfs:
+        if isinstance(d, pd.DataFrame) and not d.empty:
+            return d
+    return pd.DataFrame()
 
+# =============================================================================
+# Sidebar — seleção INDEPENDENTE + parâmetros
+# =============================================================================
 st.sidebar.markdown("### Ativo")
-asset_class = st.sidebar.selectbox("Classe", classes, index=max(classes.index(default_class), 0) if classes else 0)
-st.session_state["asset_class"] = asset_class
-
-tickers = wls.get(asset_class, [])
-symbol_sel = st.sidebar.selectbox("Ticker", tickers, index=0 if tickers else None) if tickers else None
+# Watchlists locais (não dependem de core)
+WATCHLISTS = {
+    "US_STOCKS": ["AAPL", "MSFT", "NVDA", "SPY", "QQQ"],
+    "BR_STOCKS": ["PETR4.SA", "VALE3.SA", "B3SA3.SA", "ABEV3.SA", "ITUB4.SA"],
+    "CRYPTO": ["BTC-USD", "ETH-USD", "SOL-USD"],
+    "BR_DIVIDEND": ["TAEE11.SA", "TRPL4.SA", "BBSE3.SA", "BBAS3.SA"],
+}
+classes = list(WATCHLISTS.keys())
+asset_class = st.sidebar.selectbox("Classe", classes, index=0)
+options = WATCHLISTS.get(asset_class, [])
+symbol_sel = st.sidebar.selectbox("Ticker", options, index=0 if options else None) if options else None
 symbol_manual = st.sidebar.text_input("Ou digite manualmente (ex.: SPY, BOVA11.SA)")
+
 symbol = (symbol_manual.strip() or symbol_sel or "").strip()
+if not symbol:
+    st.warning("Escolha um ativo na barra lateral.")
+    st.stop()
 
 col_p, col_i = st.sidebar.columns(2)
 period = col_p.selectbox("Período", ["1mo","3mo","6mo","1y","2y","5y","ytd","max"], index=2)
@@ -134,37 +164,34 @@ show_rangeslider = st.sidebar.checkbox("Range Slider", value=False)
 use_adjclose_for_ma = st.sidebar.checkbox("Usar Adj Close nas MAs/RSI (se existir)", value=False)
 show_bbands = st.sidebar.checkbox("Bollinger Bands", value=False)
 
-if not symbol:
-    st.warning("Escolha um ativo na barra lateral.")
-    st.stop()
-
 # =============================================================================
-# Download + fallback
+# Download + Fallback
 # =============================================================================
 with st.spinner("📥 Baixando dados..."):
-    df = _cached_download(symbol, period, interval)
-data_status_badge(df)  # badge informativo existente
+    df = _download(symbol, period, interval)
 
-# fallback automático (provider sem histórico na combinação pedida)
+# Fallback automático (quando não retorna nada para a combinação solicitada)
 if df.empty:
-    alt_periods = ["6mo", "1y", "2y"] if period in ("max", "ytd", "1mo", "3mo") else ["6mo", "1y"]
+    tries = []
+    alt_periods = ["6mo", "1y", "2y"] if period in ("ytd", "max", "1mo", "3mo") else ["6mo", "1y"]
     alt_intervals = ["1d"] if interval == "1wk" else ["1wk", "1d"]
     for p in alt_periods:
         for itv in alt_intervals:
-            df_try = _cached_download(symbol, p, itv)
+            tries.append(f"{p}/{itv}")
+            df_try = _download(symbol, p, itv)
             if not df_try.empty:
-                st.info(f"Sem dados em **{period}/{interval}**. Usando fallback **{p}/{itv}**.")
+                st.info(f"Sem dados para **{period}/{interval}**. Usando fallback **{p}/{itv}**.")
                 df, period, interval = df_try, p, itv
                 break
         if not df.empty:
             break
 
 if df.empty or "Close" not in df.columns:
-    st.error("Sem dados suficientes para plotar. Tente outro ticker/período/intervalo.")
+    st.error("Sem dados (vazio). Verifique o ticker, período/intervalo ou conexão.")
     st.stop()
 
 # =============================================================================
-# Cálculos de indicadores
+# Indicadores
 # =============================================================================
 df = df.sort_index().copy()
 price_col = "Adj Close" if (use_adjclose_for_ma and "Adj Close" in df.columns) else "Close"
@@ -183,7 +210,7 @@ if show_bbands:
     df["BB_DN"] = df["BB_MID"] - bb_std * std
 
 # =============================================================================
-# KPIs + retornos rápidos
+# KPIs e Retornos
 # =============================================================================
 last_px = float(df[price_col].iloc[-1])
 prev_px = float(df[price_col].iloc[-2]) if len(df) > 1 else last_px
@@ -225,19 +252,16 @@ st.dataframe(rets_tbl, hide_index=True, use_container_width=True)
 # =============================================================================
 rows = 3 if show_volume else 2
 row_heights = [0.55, 0.20, 0.25] if show_volume else [0.65, 0.35]
+fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=row_heights)
 
-fig = make_subplots(
-    rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=row_heights
-)
-
-# Row 1: candles + MAs (+ BB)
+# Row 1 — Candles + MAs (+ BB)
 fig.add_trace(
     go.Candlestick(
         x=df.index,
         open=df.get("Open"),
         high=df.get("High"),
         low=df.get("Low"),
-        close=df["Close"],  # candles sempre no Close "padrão"
+        close=df["Close"],  # usar Close nos candles
         name="Candles",
         showlegend=False,
     ),
@@ -251,13 +275,13 @@ if show_bbands and {"BB_MID", "BB_UP", "BB_DN"}.issubset(df.columns):
     fig.add_trace(go.Scatter(x=df.index, y=df["BB_UP"],  mode="lines", name="BB up",  line=dict(width=1, dash="dot")), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df["BB_DN"],  mode="lines", name="BB dn",  line=dict(width=1, dash="dot")), row=1, col=1)
 
-# Row 2: volume (opcional)
+# Row 2 — Volume (opcional)
 row_vol = 2 if show_volume else None
 row_rsi = 3 if show_volume else 2
 if show_volume and "Volume" in df.columns:
     fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Volume", opacity=0.35), row=row_vol, col=1)
 
-# Row 3/2: RSI
+# Row 3/2 — RSI
 fig.add_trace(go.Scatter(x=df.index, y=rsi_series, mode="lines", name=f"RSI {rsi_len}"), row=row_rsi, col=1)
 if rsi_show_bands:
     fig.add_hline(y=70, line_dash="dot", line_width=1, row=row_rsi, col=1)
@@ -279,7 +303,7 @@ fig.update_yaxes(title_text="RSI", row=row_rsi, col=1, range=[0, 100])
 st.plotly_chart(fig, use_container_width=True)
 
 # =============================================================================
-# Dados (prévia)
+# Prévia de dados
 # =============================================================================
 with st.expander("Pré-visualização de dados (head)"):
     st.dataframe(df.head(), use_container_width=True)
