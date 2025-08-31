@@ -2,409 +2,367 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Tuple
+import time
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
+# ---------------------------------------------------------------------
+# Dependências internas do app
+#   - load_watchlists: lê as listas (override em memória OU arquivo /data/watchlists.json)
+#   - download_bulk: baixa vários tickers de uma vez e retorna {ticker: DataFrame}
+# ---------------------------------------------------------------------
 from core.data import load_watchlists, download_bulk
 
-pd.options.mode.copy_on_write = True
+# ---------------------------------------------------------------------
+# UI helpers
+# ---------------------------------------------------------------------
+st.title("🔎 Screener")
+st.caption("Triagem multi-ativos (BR/US/Cripto) com métricas e filtros")
 
-# =============================================================================
-# Mapeamento de classes (rótulo UI -> chave das watchlists)
-# =============================================================================
-CLASS_MAP = {
-    "Brasil (Ações B3)": "BR_STOCKS",
-    "Brasil (FIIs)": "BR_FIIS",
-    "Brasil - Dividendos": "BR_DIVIDEND",
-    "Brasil - Blue Chips": "BR_BLUE_CHIPS",
-    "Brasil - Small Caps": "BR_SMALL_CAPS",
-    "EUA (Ações US)": "US_STOCKS",
-    "EUA - Dividendos": "US_DIVIDEND",
-    "EUA - Blue Chips": "US_BLUE_CHIPS",
-    "EUA - Small Caps": "US_SMALL_CAPS",
-    "Criptos": "CRYPTO",
+# Sidebar – Classe / Janela / Filtros
+st.sidebar.header("Classe")
+CLASS_LABELS = {
+    "BR_STOCKS": "Brasil (Ações B3)",
+    "BR_FIIS": "Brasil (FIIs)",
+    "BR_DIVIDEND": "Brasil — Dividendos",
+    "BR_BLUE_CHIPS": "Brasil — Blue Chips",
+    "BR_SMALL_CAPS": "Brasil — Small Caps",
+    "US_STOCKS": "EUA (Ações US)",
+    "US_BLUE_CHIPS": "US — Blue Chips",
+    "US_SMALL_CAPS": "US — Small Caps",
+    "CRYPTO": "Criptos",
 }
 
-# =============================================================================
-# Utilidades de métricas
-# =============================================================================
-def _safe_pct(series: pd.Series, period: int) -> float:
-    """Retorno percentual para 'period' barras (fechamento)."""
-    try:
-        if len(series) <= period:
-            return np.nan
-        return float(series.iloc[-1] / series.iloc[-1 - period] - 1.0) * 100.0
-    except Exception:
+# ---------------------------------------------------------------------
+# Carrega watchlists (arquivo ou override em memória se existir)
+# ---------------------------------------------------------------------
+WATCH = load_watchlists()  # dict[str, list[str]]
+
+# Mapeia para o rótulo “bonito” na interface
+def _choices_with_counts(watch: dict[str, list[str]]) -> list[tuple[str, str]]:
+    items = []
+    for k, lbl in CLASS_LABELS.items():
+        n = len(watch.get(k, []))
+        items.append((k, f"{lbl} · {n}"))
+    return items
+
+choices = _choices_with_counts(WATCH)
+default_key = "BR_STOCKS" if len(WATCH.get("BR_STOCKS", [])) else choices[0][0]
+selected_key = st.sidebar.selectbox(
+    "Classe", options=[c[0] for c in choices], format_func=lambda k: dict(choices)[k], index=[c[0] for c in choices].index(default_key)
+)
+
+st.sidebar.header("Janela")
+period = st.sidebar.selectbox("Período", ["3mo", "6mo", "1y", "2y", "5y"], index=1)
+interval = st.sidebar.selectbox("Intervalo", ["1d", "1wk", "1h"], index=0)
+
+st.sidebar.header("Filtros")
+min_price = st.sidebar.number_input("Preço mínimo", value=1.00, step=0.5, format="%.2f")
+min_avgvol = st.sidebar.number_input("Volume médio mín. (unid.)", value=100_000, step=10_000, format="%d")
+trend_only = st.sidebar.toggle("Somente tendência de alta (SMA50 > SMA200)", value=False)
+max_to_process = st.sidebar.slider("Máx. de ativos processados", 10, 200, 60, 1)
+
+# Botão para forçar “break” do cache de dados
+colA, colB = st.sidebar.columns([1, 1])
+with colA:
+    refresh = st.button("🔄 Recarregar dados")
+with colB:
+    st.write("")
+
+# Session key para seleção
+if "screener_selected" not in st.session_state:
+    st.session_state["screener_selected"] = []
+
+# Versão do cache (incrementa quando usuário quer forçar reload)
+if "screener_cache_ver" not in st.session_state:
+    st.session_state["screener_cache_ver"] = 0
+if refresh:
+    st.session_state["screener_cache_ver"] += 1
+ver = st.session_state["screener_cache_ver"]
+
+# ---------------------------------------------------------------------
+# Funções de indicadores
+# ---------------------------------------------------------------------
+def _close_col(df: pd.DataFrame) -> pd.Series:
+    for c in ["Adj Close", "AdjClose", "Close", "close"]:
+        if c in df.columns:
+            return df[c].astype(float)
+    # fallback: primeira coluna numérica
+    num_cols = df.select_dtypes(include=[np.number]).columns
+    if len(num_cols):
+        return df[num_cols[0]].astype(float)
+    return pd.Series(dtype=float)
+
+def _volume_col(df: pd.DataFrame) -> pd.Series:
+    for c in ["Volume", "volume", "Vol", "vol"]:
+        if c in df.columns:
+            return df[c].astype(float)
+    return pd.Series(dtype=float)
+
+def _pct(df: pd.DataFrame, bars: int) -> float:
+    c = _close_col(df)
+    if len(c) < bars + 1:
         return np.nan
+    return (c.iloc[-1] / c.iloc[-(bars + 1)] - 1.0) * 100.0
 
-
-def _rsi_wilder(close: pd.Series, length: int = 14) -> float:
-    """RSI de Wilder (retorna o último valor)."""
-    try:
-        if len(close) < length + 1:
-            return np.nan
-        delta = close.diff()
-        up = delta.clip(lower=0.0)
-        down = -delta.clip(upper=0.0)
-        roll_up = up.ewm(alpha=1.0 / length, adjust=False).mean()
-        roll_down = down.ewm(alpha=1.0 / length, adjust=False).mean()
-        rs = roll_up / roll_down.replace(0, np.nan)
-        rsi = 100.0 - (100.0 / (1.0 + rs))
-        return float(rsi.iloc[-1])
-    except Exception:
+def _rsi14(df: pd.DataFrame) -> float:
+    c = _close_col(df)
+    if len(c) < 15:
         return np.nan
+    delta = c.diff()
+    up = delta.clip(lower=0.0)
+    down = -delta.clip(upper=0.0)
+    roll_up = up.rolling(14).mean()
+    roll_down = down.rolling(14).mean()
+    rs = roll_up / (roll_down.replace(0, np.nan))
+    rsi = 100 - (100 / (1 + rs))
+    return float(rsi.iloc[-1])
 
-
-def _sma(series: pd.Series, n: int) -> float:
-    try:
-        if len(series) < n:
-            return np.nan
-        return float(series.iloc[-n:].mean())
-    except Exception:
+def _sma(df: pd.DataFrame, n: int) -> float:
+    c = _close_col(df)
+    if len(c) < n:
         return np.nan
+    return float(c.rolling(n).mean().iloc[-1])
 
-
-def _ann_vol(close: pd.Series) -> float:
-    """Volatilidade anualizada por retornos diários."""
-    try:
-        if len(close) < 3:
-            return np.nan
-        rets = close.pct_change().dropna()
-        vol = float(rets.std() * math.sqrt(252)) * 100.0
-        return vol
-    except Exception:
+def _vol_ann(df: pd.DataFrame, interval: str) -> float:
+    c = _close_col(df).pct_change().dropna()
+    if c.empty:
         return np.nan
+    if interval == "1d":
+        scale = math.sqrt(252)
+    elif interval == "1wk":
+        scale = math.sqrt(52)
+    elif interval == "1h":
+        # aproximado (6h úteis/dia * 252 dias ~ 1512 barras)
+        scale = math.sqrt(1512)
+    else:
+        scale = 1.0
+    return float(c.std() * 100.0 * scale)
 
-
-def _avg_volume(volume: pd.Series, n: int = 20) -> float:
-    try:
-        if volume is None:
-            return np.nan
-        return float(volume.tail(n).mean())
-    except Exception:
+def _avgvol(df: pd.DataFrame, lookback=60) -> float:
+    v = _volume_col(df)
+    if v.empty:
         return np.nan
+    x = v.tail(lookback)
+    if x.empty:
+        return np.nan
+    return float(x.mean())
 
+# ---------------------------------------------------------------------
+# Cache de dados (wrapper com parâmetros “hasháveis”)
+# ATENÇÃO: não passe função/callback para o cache (daria UnhashableParamError)
+# ---------------------------------------------------------------------
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_bulk(period: str, interval: str, symbols_tuple: tuple[str, ...], _ver: int) -> dict[str, pd.DataFrame]:
+    # _ver é propositalmente não usado: serve só para invalidar o cache quando muda
+    symbols = list(symbols_tuple)
+    return download_bulk(symbols, period=period, interval=interval)
 
-def _trend_up(close: pd.Series) -> bool:
-    sma50 = _sma(close, 50)
-    sma200 = _sma(close, 200)
-    if np.isnan(sma50) or np.isnan(sma200):
-        return False
-    return sma50 > sma200
+# ---------------------------------------------------------------------
+# Monta universo e baixa dados
+# ---------------------------------------------------------------------
+symbols_all = WATCH.get(selected_key, [])[:]
+total_in_class = len(symbols_all)
 
+st.markdown(
+    f"Processando **{min(total_in_class, max_to_process)}** de **{total_in_class}** ativos desta classe…"
+)
 
-def _score(row: pd.Series) -> float:
-    """
-    Score simples (0..100): tendência, retornos recentes, RSI e volatilidade.
-    Ajuste pesos conforme preferir.
-    """
-    score = 0.0
+symbols = symbols_all[:max_to_process]
 
-    # tendência
-    if row.get("TrendUp", False):
-        score += 35.0
+# Baixa tudo de uma vez (mais rápido do que 1 a 1)
+with st.spinner("Baixando séries..."):
+    data_dict = _fetch_bulk(period, interval, tuple(symbols), ver)
 
-    # retornos recentes (cap 0..25)
-    add = 0.0
-    for k, w in [("D1%", 2.0), ("D5%", 6.0), ("M1%", 8.0), ("M6%", 9.0)]:
-        v = row.get(k, 0.0)
-        if not np.isnan(v):
-            add += np.clip(v, -10, 10) * (w / 40.0)
-    score += np.clip(add, -25, 25)
+# ---------------------------------------------------------------------
+# Calcula métricas por ativo
+# ---------------------------------------------------------------------
+@dataclass
+class Row:
+    Symbol: str
+    Price: float
+    D1: float
+    D5: float
+    M1: float
+    M6: float
+    Y1: float
+    VolAnn: float
+    AvgVol: float
+    RSI14: float
+    TrendUp: bool
+    Score: float
 
-    # RSI
-    rsi = row.get("RSI14", np.nan)
-    if not np.isnan(rsi):
-        if 45 <= rsi <= 70:
-            score += 20.0
-        elif rsi < 30 or rsi > 80:
-            score -= 10.0
+rows: list[Row] = []
 
-    # volatilidade
-    vol = row.get("VolAnn%", np.nan)
-    if not np.isnan(vol):
-        if vol > 80:
-            score -= 10.0
-        elif vol < 20:
-            score += 5.0
+prog = st.progress(0.0, text="Processando métricas...")
+n = len(symbols)
+for i, s in enumerate(symbols, start=1):
+    df = data_dict.get(s)
+    if df is None or len(df) < 5:
+        prog.progress(i / max(1, n), text=f"Sem dados: {s}")
+        continue
 
-    return float(np.clip(score, 0.0, 100.0))
+    close = _close_col(df)
+    price = float(close.iloc[-1]) if len(close) else np.nan
 
+    d1 = _pct(df, 1)
+    d5 = _pct(df, 5)
+    m1 = _pct(df, 21)
+    m6 = _pct(df, 126)
+    y1 = _pct(df, 252)
 
-# =============================================================================
-# UI auxiliar
-# =============================================================================
-def _ui_sidebar(wl: dict) -> Tuple[List[str], str, str, str, float, float, bool, int, bool]:
-    with st.sidebar:
-        st.markdown("### Classe")
-        class_label = st.selectbox(
-            "Classe", list(CLASS_MAP.keys()), index=0, label_visibility="collapsed"
-        )
-        key = CLASS_MAP[class_label]
-        symbols = wl.get(key, [])
-        st.caption(f"Total na classe: **{len(symbols)}**")
+    volann = _vol_ann(df, interval)
+    avgvol = _avgvol(df, 60)
+    rsi = _rsi14(df)
 
-        st.markdown("### Janela")
-        period = st.selectbox("Período", ["6mo", "1y", "2y", "5y"], index=0)
-        interval = st.selectbox("Intervalo", ["1d", "1wk", "1mo"], index=0)
+    sma50 = _sma(df, 50)
+    sma200 = _sma(df, 200)
+    trend = bool(pd.notna(sma50) and pd.notna(sma200) and sma50 > sma200)
 
-        st.markdown("### Filtros")
-        price_min = float(st.number_input("Preço mínimo", value=1.00, step=0.5, format="%.2f"))
-        vol_min = float(
-            st.number_input("Volume médio mínimo (unid.)", value=100_000.0, step=10_000.0, format="%.0f")
-        )
-        trend_only = st.checkbox("Somente tendência de alta (SMA50>SMA200)", value=False)
+    # Score simples (normalização robusta por percentuais + bônus de tendência)
+    comps = [d1, d5, m1, m6, y1]
+    vals = [x for x in comps if pd.notna(x)]
+    score = float(np.nan) if not vals else float(np.nanmean(vals))
+    if trend and not math.isnan(score):
+        score += 2.0
 
-        max_items = int(
-            st.slider("Máx. de ativos processados", min_value=10, max_value=200, value=min(60, len(symbols)))
-        )
-
-        debug_download = st.toggle("Modo debug de download", value=False)
-
-    return symbols, class_label, period, interval, price_min, vol_min, trend_only, max_items, debug_download
-
-
-def _expander_criterios() -> None:
-    with st.expander("📊 Critérios & métricas (clique para ver)", expanded=False):
-        st.markdown(
-            """
-**Métricas calculadas**
-- **Price**: último fechamento.
-- **D1%, D5%, M1%, M6%, Y1%**: retornos percentuais (1 dia, 5 dias, ~21, ~126, ~252 barras).
-- **VolAnn%**: volatilidade anualizada (desvio-padrão dos retornos diários × √252).
-- **AvgVol**: média dos últimos 20 volumes.
-- **RSI14**: RSI de Wilder com 14 períodos.
-- **TrendUp**: `SMA50 > SMA200`.
-- **Score**: composto simples (tendência, retornos recentes, RSI e volatilidade).
-
-**Filtros**
-- **Preço mínimo** e **Volume médio mínimo** atuam sobre `Price` e `AvgVol`.
-- Se marcar **Somente tendência de alta**, apenas ativos com `SMA50>SMA200` passam.
-"""
-        )
-
-
-def _calc_row_metrics(df: pd.DataFrame) -> Dict[str, float | bool]:
-    """Extrai métricas do DataFrame de um símbolo."""
-    if df is None or df.empty or "Close" not in df.columns:
-        return {}
-
-    close = df["Close"].astype(float)
-    price = float(close.iloc[-1])
-
-    d1 = _safe_pct(close, 1)
-    d5 = _safe_pct(close, 5)
-    m1 = _safe_pct(close, 21)
-    m6 = _safe_pct(close, 126)
-    y1 = _safe_pct(close, 252)
-
-    vol_ann = _ann_vol(close)
-    rsi14 = _rsi_wilder(close, 14)
-
-    avgvol = _avg_volume(df["Volume"], 20) if "Volume" in df.columns else np.nan
-    trend = _trend_up(close)
-
-    row = {
-        "Price": price,
-        "D1%": d1,
-        "D5%": d5,
-        "M1%": m1,
-        "M6%": m6,
-        "Y1%": y1,
-        "VolAnn%": vol_ann,
-        "AvgVol": avgvol,
-        "RSI14": rsi14,
-        "TrendUp": trend,
-    }
-    row["Score"] = _score(pd.Series(row))
-    return row
-
-
-def _apply_filters(df: pd.DataFrame, price_min: float, vol_min: float, trend_only: bool) -> pd.DataFrame:
-    out = df.copy()
-    if "Price" in out.columns:
-        out = out[out["Price"].fillna(0) >= price_min]
-    if "AvgVol" in out.columns:
-        out = out[out["AvgVol"].fillna(0) >= vol_min]
-    if trend_only and "TrendUp" in out.columns:
-        out = out[out["TrendUp"] == True]  # noqa: E712
-    return out
-
-
-def _data_editor_selection(df: pd.DataFrame) -> List[str]:
-    """Tabela com checkbox para escolher papéis e enviar ao Backtest."""
-    if df.empty:
-        return []
-    editable = df.copy()
-    if "Select" not in editable.columns:
-        editable.insert(0, "Select", False)
-    edited = st.data_editor(
-        editable,
-        hide_index=True,
-        use_container_width=True,
-        num_rows="dynamic",
-        column_config={"Select": st.column_config.CheckboxColumn(required=False)},
-        key="screener_table_editor",
+    rows.append(
+      Row(
+        Symbol=s, Price=price, D1=d1, D5=d5, M1=m1, M6=m6, Y1=y1,
+        VolAnn=volann, AvgVol=avgvol, RSI14=rsi, TrendUp=trend, Score=score
+      )
     )
-    selected = edited.loc[edited["Select"] == True, "Symbol"].tolist() if "Select" in edited.columns else []  # noqa: E712
-    return selected
+    prog.progress(i / max(1, n), text=f"Processando {s} ({i}/{n})")
 
+prog.empty()
 
-# =============================================================================
-# Página principal
-# =============================================================================
-def main() -> None:
-    st.title("Screener")
-    st.caption("Triagem multi-ativos (BR/US/Cripto) com métricas e filtros")
+if not rows:
+    st.warning("Nenhum ativo processado. Ajuste filtros/consulta ou atualize as watchlists em **Settings**.")
+    st.stop()
 
-    # 1) Watchlists
-    wl = load_watchlists()
+df = pd.DataFrame([r.__dict__ for r in rows])
 
-    # 2) UI lateral
-    (
-        symbols,
-        class_label,
-        period,
-        interval,
-        price_min,
-        vol_min,
-        trend_only,
-        max_items,
-        debug_download,
-    ) = _ui_sidebar(wl)
+# ---------------------------------------------------------------------
+# Aplica filtros
+# ---------------------------------------------------------------------
+mask = pd.Series(True, index=df.index)
+mask &= df["Price"] >= float(min_price)
+mask &= (df["AvgVol"].fillna(0.0) >= float(min_avgvol))
+if trend_only:
+    mask &= df["TrendUp"].fillna(False)
 
-    _expander_criterios()
+df = df[mask].copy()
 
-    if not symbols:
-        st.warning("Nenhum ativo nesta classe. Atualize as watchlists em **Settings** ou reduza filtros.")
-        st.stop()
+# ---------------------------------------------------------------------
+# Ordenação
+# ---------------------------------------------------------------------
+st.subheader("Ordenar por")
+order_cols = {
+    "Score": "Score",
+    "Preço": "Price",
+    "D1%": "D1",
+    "D5%": "D5",
+    "M1%": "M1",
+    "M6%": "M6",
+    "Y1%": "Y1",
+    "VolAnn%": "VolAnn",
+    "RSI14": "RSI14",
+    "AvgVol": "AvgVol",
+    "Tendência": "TrendUp",
+}
+col_s, col_dir = st.columns([3, 1])
+with col_s:
+    order_by = st.selectbox("Coluna", list(order_cols.keys()), index=0)
+with col_dir:
+    asc = st.toggle("Ordem crescente", value=False)
 
-    # limita quantidade
-    symbols = symbols[:max_items]
+df.sort_values(order_cols[order_by], ascending=asc, inplace=True, na_position="last")
 
-    # 3) versão das watchlists para quebrar o cache
-    ver = int(st.session_state.get("watchlists_version", 0))
+# ---------------------------------------------------------------------
+# Exibição (com um pouco de cor nas variações e no score)
+# ---------------------------------------------------------------------
+def _fmt_pct(x):
+    return "" if pd.isna(x) else f"{x:,.2f}%"
 
-    # 4) download com barra de progresso e contadores
-    ok_count = 0
-    empty_count = 0
-    error_count = 0
+def _fmt_price(x):
+    return "" if pd.isna(x) else f"{x:,.2f}"
 
-    st.markdown(f"Processando **{len(symbols)}** ativos desta classe…")
+def _fmt_int(x):
+    return "" if pd.isna(x) else f"{int(x):,}".replace(",", ".")
 
-    def _cb(done: int, total: int, sym: str, ok: bool, reason: str):
-        nonlocal ok_count, empty_count, error_count
-        prog.progress(done / total)
-        if ok:
-            ok_count += 1
-            if debug_download:
-                st.write(f"{done}/{total} ✓ {sym}")
-        else:
-            if reason == "empty":
-                empty_count += 1
-                if debug_download:
-                    st.write(f"{done}/{total} ∅ {sym} (vazio)")
-            else:
-                error_count += 1
-                if debug_download:
-                    st.write(f"{done}/{total} ✗ {sym} ({reason})")
+formatters = {
+    "Price": _fmt_price,
+    "D1": _fmt_pct,
+    "D5": _fmt_pct,
+    "M1": _fmt_pct,
+    "M6": _fmt_pct,
+    "Y1": _fmt_pct,
+    "VolAnn": _fmt_pct,
+    "AvgVol": _fmt_int,
+    "RSI14": lambda x: "" if pd.isna(x) else f"{x:,.1f}",
+    "Score": lambda x: "" if pd.isna(x) else f"{x:,.2f}",
+}
 
-    # status com fallback se a função não aceitar callback
-    with st.status(f"Baixando {len(symbols)} ativo(s)…", expanded=debug_download) as status:
-        prog = st.progress(0.0)
-        try:
-            data_dict = download_bulk(
-                symbols, period=period, interval=interval, ver=ver, callback=_cb
-            )
-        except TypeError:
-            # versão antiga de download_bulk sem callback
-            data_dict = download_bulk(symbols, period=period, interval=interval, ver=ver)
-            # estimativa simples para contadores
-            for s in symbols:
-                df = data_dict.get(s)
-                if df is None:
-                    error_count += 1
-                elif df.empty:
-                    empty_count += 1
-                else:
-                    ok_count += 1
-            prog.progress(1.0)
+def _color_pct(v):
+    if pd.isna(v): 
+        return ""
+    c = "#2ecc71" if v >= 0 else "#e74c3c"
+    return f"color:{c}"
 
-        status.update(
-            label=f"Download concluído: {ok_count} OK, {empty_count} vazios, {error_count} erro(s).",
-            state="complete",
-        )
+def _color_score(v):
+    if pd.isna(v):
+        return ""
+    c = "#2ecc71" if v >= 0 else "#e74c3c"
+    return f"font-weight:600;color:{c}"
 
-    # 5) métricas
-    rows: List[Dict] = []
-    for s in symbols:
-        df = data_dict.get(s)
-        metrics = _calc_row_metrics(df)
-        if metrics:
-            row = {"Symbol": s}
-            row.update(metrics)
-            rows.append(row)
+styled = (
+    df.rename(columns={
+        "Symbol": "Symbol",
+        "Price": "Price",
+        "D1": "D1%",
+        "D5": "D5%",
+        "M1": "M1%",
+        "M6": "M6%",
+        "Y1": "Y1%",
+        "VolAnn": "VolAnn%",
+        "AvgVol": "AvgVol",
+        "RSI14": "RSI14",
+        "TrendUp": "TrendUp",
+        "Score": "Score",
+    })
+      .style
+      .map(_color_pct, subset=["D1%","D5%","M1%","M6%","Y1%"])
+      .map(_color_score, subset=["Score"])
+      .format({
+          "Price": _fmt_price,
+          "D1%": _fmt_pct, "D5%": _fmt_pct, "M1%": _fmt_pct, "M6%": _fmt_pct, "Y1%": _fmt_pct,
+          "VolAnn%": _fmt_pct, "AvgVol": _fmt_int, "RSI14": lambda x: "" if pd.isna(x) else f"{x:,.1f}",
+          "Score": lambda x: "" if pd.isna(x) else f"{x:,.2f}",
+      })
+)
 
-    if not rows:
-        st.warning(
-            f"Nenhum ativo com dados utilizáveis. "
-            f"OK: {ok_count} | Vazios: {empty_count} | Erros: {error_count}. "
-            f"Tente outro período/intervalo ou reduzir filtros."
-        )
-        st.stop()
+st.dataframe(styled, height=480, width="stretch")
 
-    base_df = pd.DataFrame(rows)
+# ---------------------------------------------------------------------
+# Seleção para envio ao Backtest
+# ---------------------------------------------------------------------
+st.subheader("Marque os ativos que deseja enviar para o Backtest")
 
-    # 6) filtros
-    filtered = _apply_filters(base_df, price_min=price_min, vol_min=vol_min, trend_only=trend_only)
+# Sugere seleção padrão (os 10 melhores por Score)
+suggest = df.sort_values("Score", ascending=False).head(10)["Symbol"].tolist()
 
-    # cards-resumo
-    colA, colB, colC, colD = st.columns(4)
-    colA.metric("Baixados OK", ok_count)
-    colB.metric("Vazios", empty_count)
-    colC.metric("Erros", error_count)
-    colD.metric("Passaram filtros", int(filtered.shape[0]))
+selected = st.multiselect(
+    "Selecione tickers",
+    options=df["Symbol"].tolist(),
+    default=st.session_state.get("screener_selected", suggest),
+)
 
-    # 7) ordenação
-    st.markdown("### Ordenar por")
-    order_by = st.selectbox(
-        "Ordenar por",
-        options=["Score", "Price", "D1%", "D5%", "M1%", "M6%", "Y1%", "VolAnn%", "AvgVol", "RSI14", "TrendUp", "Symbol"],
-        index=0,
-        label_visibility="collapsed",
+if st.button("Usar seleção no Backtest"):
+    st.session_state["screener_selected"] = selected
+    st.success(
+        f"Seleção salva: {len(selected)} ativos. "
+        "Use a opção de Backtest para continuar."
     )
-    asc = st.checkbox("Ordem crescente", value=False)
-
-    filtered = filtered.sort_values(order_by, ascending=asc, na_position="last")
-
-    # 8) tabela
-    st.dataframe(
-        filtered[["Symbol", "Price", "D1%", "D5%", "M1%", "M6%", "Y1%", "VolAnn%", "AvgVol", "RSI14", "TrendUp", "Score"]],
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    st.divider()
-    st.markdown("### Marque os ativos que deseja enviar para o Backtest")
-
-    # 9) seleção para backtest
-    selected = _data_editor_selection(
-        filtered[["Symbol", "Price", "D1%", "D5%", "M1%", "M6%", "Y1%", "VolAnn%", "AvgVol", "RSI14", "TrendUp", "Score"]]
-    )
-    if selected:
-        st.success(f"{len(selected)} ativo(s) selecionado(s): {', '.join(selected[:10])}{'…' if len(selected) > 10 else ''}")
-
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        if st.button("Usar seleção no Backtest", use_container_width=True):
-            st.session_state["screener_selected"] = selected
-            st.success("Seleção enviada. Abra a página **Backtest** para usar os ativos.")
-    with col2:
-        st.caption("A seleção fica disponível em `st.session_state['screener_selected']`.")
-
-
-if __name__ == "__main__":
-    main()
