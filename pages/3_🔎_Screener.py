@@ -1,4 +1,5 @@
 # pages/3_🔎_Screener.py
+from core.data import load_watchlists, download_bulk   # <<< importante: usar load_watchlists
 from __future__ import annotations
 import pandas as pd
 import streamlit as st
@@ -8,55 +9,73 @@ from core.data import load_watchlists, download_bulk
 from core.indicators import sma, rsi
 # --- Watchlists (fonte única + debug) ---------------------------------------
 # --- Watchlists + classe ----------------------------------------------------
-from core.data import load_watchlists
-wl = load_watchlists()
+# ----------------------------------------------------------------------
+# 1) Carrega as watchlists da origem atual (arquivo ou override da Settings)
+# ----------------------------------------------------------------------
+wl = load_watchlists()  # respeita override (memória) se existir
 
-# versão usada só para invalidar caches quando as watchlists forem atualizadas
-ver: int = int(st.session_state.get("watchlists_version", 0))
-
-st.caption(
-    f"Watchlists: {'override (memória)' if 'watchlists_override' in st.session_state else 'arquivo'} "
-    f"• v{ver} • BR:{len(wl.get('BR_STOCKS',[]))} | FIIs:{len(wl.get('BR_FIIS',[]))} | "
-    f"BR Div:{len(wl.get('BR_DIVIDEND',[]))} | US:{len(wl.get('US_STOCKS',[]))} | "
-    f"Cripto:{len(wl.get('CRYPTO',[]))}"
-)
-
+# Mapa de rótulos (UI) -> chaves do dicionário de watchlists
 CLASS_MAP = {
-    "Brasil (Ações B3)":   wl.get("BR_STOCKS", []),
-    "Brasil (FIIs)":       wl.get("BR_FIIS", []),
-    "Brasil — Dividendos": wl.get("BR_DIVIDEND", []),
-    "Brasil — Blue Chips": wl.get("BR_BLUE_CHIPS", []),
-    "Brasil — Small Caps": wl.get("BR_SMALL_CAPS", []),
-    "EUA (Ações US)":      wl.get("US_STOCKS", []),
-    "EUA — Dividendos":    wl.get("US_DIVIDEND", []),
-    "EUA — Blue Chips":    wl.get("US_BLUE_CHIPS", []),
-    "EUA — Small Caps":    wl.get("US_SMALL_CAPS", []),
-    "Criptos":             wl.get("CRYPTO", []),
+    "Brasil (Ações B3)"      : "BR_STOCKS",
+    "Brasil (FIIs)"          : "BR_FIIS",
+    "Brasil — Dividendos"    : "BR_DIVIDEND",
+    "Brasil — Blue Chips"    : "BR_BLUE_CHIPS",
+    "Brasil — Small Caps"    : "BR_SMALL_CAPS",
+    "EUA (Ações US)"         : "US_STOCKS",
+    "EUA — Dividendos"       : "US_DIVIDEND",
+    "EUA — Blue Chips"       : "US_BLUE_CHIPS",
+    "EUA — Small Caps"       : "US_SMALL_CAPS",
+    "Criptos"                : "CRYPTO",
 }
-classe = st.selectbox("Classe", list(CLASS_MAP.keys()), index=0)
-symbols = CLASS_MAP[classe]
 
+# ----------------------------------------------------------------------
+# 2) UI de seleção da classe (sidebar)
+# ----------------------------------------------------------------------
+with st.sidebar:
+    st.markdown("### Classe")
+    class_label = st.selectbox(
+        "Classe", list(CLASS_MAP.keys()), index=0, label_visibility="collapsed"
+    )
+
+key = CLASS_MAP[class_label]
+symbols = wl.get(key, [])
+st.sidebar.caption(f"**Total na classe:** {len(symbols)}")
+
+# Se não houver símbolos, avisa e sai
 if not symbols:
-    st.warning("Nenhum ativo nesta classe. Atualize as watchlists na Settings ou reduza filtros.")
-    st.code({k: len(v) for k, v in CLASS_MAP.items()}, language="json")
+    st.warning("Nenhum ativo nesta classe. Atualize as watchlists na **Settings** ou relaxe os filtros.")
     st.stop()
 
-# --- Controles de período / intervalo (defina ANTES de chamar _bulk) -------
-cP, cI = st.columns(2)
-with cP:
-    period = st.selectbox("Período", ["3mo", "6mo", "1y", "2y", "5y"], index=1, key="scr_period")
-with cI:
-    interval = st.selectbox("Intervalo", ["1d", "1wk"], index=0, key="scr_interval")
+# ----------------------------------------------------------------------
+# 3) Parâmetros de período/intervalo e quebra de cache por versão
+# ----------------------------------------------------------------------
+with st.sidebar:
+    period   = st.selectbox("Período",   ["6mo","1y","2y","5y","10y"], index=0)
+    interval = st.selectbox("Intervalo", ["1d","1wk","1mo"], index=0)
 
-# --- Cache de download (usa 'ver' para quebrar cache quando listas mudam) ---
-@st.cache_data(ttl=600)
-def _bulk(period: str, interval: str, symbols_tuple: tuple, _version: int):
-    from core.data import download_bulk
-    # _version é propositalmente não usado; serve só para invalidar o cache
-    return download_bulk(list(symbols_tuple), period=period, interval=interval)
+# versão do override para quebrar caches quando você atualizar na Settings
+ver = int(st.session_state.get("watchlists_version", 0))
 
-# >>> AGORA sim, com 'period' e 'interval' definidos, chame o cache:
-data = _bulk(period, interval, tuple(symbols), ver)
+# ----------------------------------------------------------------------
+# 4) Baixa os dados respeitando a versão (cache-busting)
+# ----------------------------------------------------------------------
+# OBS: certifique-se de que download_bulk aceite ver como parâmetro opcional!
+data = download_bulk(symbols, period=period, interval=interval, ver=ver)
+
+# Monta uma tabela simples (exemplo)
+rows = []
+for s, df in data.items():
+    if df is None or df.empty or "Close" not in df.columns:
+        continue
+    last = df["Close"].iloc[-1]
+    r1d  = df["Close"].pct_change().iloc[-1] * 100 if len(df) > 1 else 0.0
+    rows.append({"Symbol": s, "Price": last, "D1%": r1d})
+
+if not rows:
+    st.info("Sem dados suficientes para exibir. Tente outro período/intervalo.")
+else:
+    out = pd.DataFrame(rows).sort_values("Symbol")
+    st.dataframe(out, use_container_width=True, hide_index=True)
 
 
 
