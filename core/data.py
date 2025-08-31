@@ -146,16 +146,48 @@ def download_history(symbol: str, period: str = "6mo", interval: str = "1d") -> 
 
 
 @st.cache_data(show_spinner=False)
-def download_bulk(symbols: list[str], period: str, interval: str, ver: int = 0) -> dict[str, pd.DataFrame]:
+def download_bulk(
+    symbols: list[str],
+    period: str,
+    interval: str,
+    ver: int = 0,
+    callback=None,  # <<< opcional, para reportar progresso
+) -> dict[str, pd.DataFrame]:
+    """
+    Baixa dados para vários símbolos. `ver` serve apenas para invalidar o cache.
+    Se `callback` for fornecido, será chamado como callback(done, total, symbol, ok, reason).
+    """
     result: dict[str, pd.DataFrame] = {}
     if not symbols:
         return result
-    for s in symbols:
+
+    total = len(symbols)
+    for i, s in enumerate(symbols, start=1):
+        ok, reason = False, ""
         try:
-            df = yf.download(s, period=period, interval=interval, progress=False, auto_adjust=False)
-        except Exception:
+            df = yf.download(
+                s,
+                period=period,
+                interval=interval,
+                progress=False,
+                auto_adjust=False,
+                threads=False,     # ajuda a reduzir falhas do Yahoo
+            )
+            if df is not None and not df.empty:
+                result[s] = df
+                ok = True
+            else:
+                reason = "empty"
+        except Exception as e:
             df = pd.DataFrame()
-        result[s] = df
+            reason = f"error: {type(e).__name__}"
+
+        if callback:
+            try:
+                callback(i, total, s, ok, reason)
+            except Exception:
+                pass
+
     return result
 
 
