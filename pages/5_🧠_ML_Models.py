@@ -484,10 +484,125 @@ for tab, sym in zip(tabs, equities.keys()):
             )
             st.plotly_chart(fig2, use_container_width=True)
 
+#===================================================================================================================================================================================================================
+#===================================================================================================================================================================================================================
+#===================================================================================================================================================================================================================
+#===================================================================================================================================================================================================================
+# ================== RESUMO ALINHADO DO ATIVO EM ANÁLISE ==================
+import math
+import numpy as np
+import streamlit as st
 
+def _last(x):
+    """Último valor numérico seguro de Series/list/ndarray; NaN se não houver."""
+    try:
+        if x is None:
+            return np.nan
+        if hasattr(x, "iloc"):  # pandas Series
+            if len(x) == 0: 
+                return np.nan
+            return float(x.iloc[-1])
+        # lista/tupla/ndarray
+        x = list(x)
+        if len(x) == 0:
+            return np.nan
+        return float(x[-1])
+    except Exception:
+        return np.nan
 
+def _fmt(x, kind="num"):
+    """Formatação tolerante a NaN."""
+    if x is None or (isinstance(x, (float, int)) and (math.isnan(x) or not math.isfinite(x))):
+        return "N/A"
+    v = float(x)
+    if kind == "num":
+        return f"{v:.2f}"
+    if kind == "pct":
+        return f"{v:.1%}"
+    if kind == "int":
+        return f"{int(round(v))}"
+    return str(v)
 
+def resumo_alinhado(sym, df, p_series=None, threshold=0.55):
+    """
+    Renderiza um card de resumo para o mesmo ativo já exibido no gráfico.
+    - sym: ticker (str)
+    - df: DataFrame OHLCV do ativo em análise (mesmo do gráfico)
+    - p_series: série de probabilidade usada no gráfico (opcional)
+    - threshold: limiar de compra p(up)
+    """
+    # -------- dados base (preço de fechamento) --------
+    close = df["Close"] if "Close" in df.columns else (
+        df.iloc[:, -1] if hasattr(df, "columns") and len(df.columns) else None
+    )
+    px = _last(close)
 
+    # -------- tendência simples (SMA20 vs SMA50) --------
+    fast = close.rolling(20).mean() if close is not None else None
+    slow = close.rolling(50).mean() if close is not None else None
+    fast_gt_slow = _last(fast) > _last(slow)
+
+    # -------- RSI(14) --------
+    rsi_last = np.nan
+    if close is not None and len(close) >= 15:
+        diff = close.diff()
+        up = diff.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
+        dn = (-diff.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
+        rs = up / dn
+        rsi = 100 - (100 / (1 + rs))
+        rsi_last = _last(rsi)
+
+    # -------- ATR(14) (se H/L/C disponíveis) --------
+    atr_last = np.nan
+    if all(c in df.columns for c in ["High", "Low", "Close"]):
+        tr = np.maximum(df["High"] - df["Low"],
+                        np.maximum((df["High"] - df["Close"].shift(1)).abs(),
+                                   (df["Low"]  - df["Close"].shift(1)).abs()))
+        atr = tr.rolling(14).mean()
+        atr_last = _last(atr)
+
+    # -------- probabilidade (p_series do gráfico) --------
+    p_up = _last(p_series) if p_series is not None else np.nan
+
+    # -------- regras simples --------
+    prob_ok = (p_up >= threshold) if not math.isnan(p_up) else False
+    rsi_ok  = (45 <= rsi_last <= 70) if not math.isnan(rsi_last) else False
+    good    = prob_ok and fast_gt_slow and rsi_ok
+
+    # -------- UI --------
+    with st.expander(f"📌 {sym} — Resumo rápido", expanded=True):
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Preço",    _fmt(px))
+        c2.metric("Prob. ↑",  _fmt(p_up, "pct"))
+        c3.metric("RSI(14)",  _fmt(rsi_last))
+        c4.metric("ATR(14)",  _fmt(atr_last))
+
+        st.caption(
+            f"Tendência (SMA20>SMA50): **{'Sim' if fast_gt_slow else 'Não'}**  |  "
+            f"Limiar p(up): **{_fmt(threshold)}**"
+        )
+
+        if good:
+            # stop/target simples a partir do ATR; se ATR ausente, usa % fixo
+            stop = px - (1.5 * atr_last if not math.isnan(atr_last) else px * 0.03)
+            tgt  = px + (3.0  * atr_last if not math.isnan(atr_last) else px * 0.06)
+            rr = (tgt - px) / (px - stop) if (stop < px < tgt) else np.nan
+            st.success(
+                "Cenário favorável para **compra**.\n\n"
+                f"- Entrada: **{_fmt(px)}**  \n"
+                f"- Stop: **{_fmt(stop)}**  \n"
+                f"- Alvo: **{_fmt(tgt)}**  \n"
+                f"- R:R: {_fmt(rr)}"
+            )
+        else:
+            faltando = []
+            if not prob_ok:      faltando.append("probabilidade ≥ limiar")
+            if not fast_gt_slow: faltando.append("SMA20>SMA50")
+            if not rsi_ok:       faltando.append("RSI entre 45–70")
+            st.info("Sem entrada agora. " + (("Faltando: " + ", ".join(faltando)) if faltando else ""))
+
+        st.caption("Material educacional; não é recomendação.")
+# ================== /RESUMO ALINHADO ==================
 
 
 
