@@ -25,14 +25,27 @@ app_header("🎲 Monte Carlo", "Cenários do portfólio: fan chart, distribuiç�
 # Cache de retornos
 # --------------------------------------------------------------------------------------
 @st.cache_data(ttl=600)
+@st.cache_data(ttl=600)
 def _cached_returns(symbols_tuple, period, interval):
     data = download_bulk(list(symbols_tuple), period=period, interval=interval)
-    rets = {
-        s: df["Close"].pct_change().dropna()
-        for s, df in data.items()
-        if (df is not None and not df.empty and "Close" in df.columns)
-    }
-    return pd.DataFrame(rets).dropna()
+
+    series_list = []
+    for s, df in (data or {}).items():
+        if isinstance(df, pd.DataFrame) and not df.empty and "Close" in df.columns:
+            # garante tipo numérico e série de retornos com nome
+            sr = pd.to_numeric(df["Close"], errors="coerce").pct_change().dropna()
+            if not sr.empty:
+                sr.name = str(s)
+                series_list.append(sr)
+
+    if not series_list:
+        # retorna DF vazio e deixa o chamador tratar
+        return pd.DataFrame()
+
+    # concatena por coluna, alinhando por índice e limpando NaNs
+    rets_df = pd.concat(series_list, axis=1, join="inner").dropna(how="any")
+    return rets_df
+
 
 # --------------------------------------------------------------------------------------
 # Seleção de ativos
