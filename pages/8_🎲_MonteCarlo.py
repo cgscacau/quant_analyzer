@@ -347,3 +347,159 @@ st.download_button(
     file_name=f"mc_fanchart_{h_months}m_{n_sims}sim.csv",
     mime="text/csv",
 )
+
+#================================================================================================================================================================================================
+#================================================================================================================================================================================================
+#================================================================================================================================================================================================
+# ============================================================
+# 🔽 RESUMO DETALHADO — Monte Carlo (plug-and-play)
+# Cole a partir daqui no FINAL da página Monte Carlo
+# ============================================================
+import io
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+# ---------- capturar variáveis já existentes (com fallback seguro) ----------
+def _g(name, default=None):
+    return globals().get(name, default)
+
+# equity: matriz (T+1, S) | aceita também DataFrame
+equity_obj = _g("equity", None) or (_g("res", {}) or {}).get("equity", None)
+if isinstance(equity_obj, pd.DataFrame):
+    EQ = equity_obj.to_numpy()
+elif isinstance(equity_obj, np.ndarray):
+    EQ = equity_obj
+else:
+    EQ = None
+
+if EQ is None or EQ.ndim != 2 or EQ.shape[1] < 1:
+    st.warning("Resumo Monte Carlo: não encontrei `equity` (matriz T×S).")
+else:
+    interval = (_g("interval", "1d") or "1d").strip().lower()
+    steps_total = EQ.shape[0] - 1
+    sims = EQ.shape[1]
+    steps_year = 252 if interval == "1d" else 52
+
+    start_equity = float(_g("init_cap", np.nan))
+    if not np.isfinite(start_equity):
+        start_equity = float(np.nanmedian(EQ[0, :]))
+
+    # ---------- métricas por cenário ----------
+    final = EQ[-1, :]                       # equity final por sim
+    gain  = final / EQ[0, :]                # multiplicador total
+    cagr  = np.power(gain, steps_year / max(steps_total, 1)) - 1.0
+
+    # Max Drawdown por caminho (rápido e vetorizado)
+    roll_max = np.maximum.accumulate(EQ, axis=0)
+    dd = EQ / np.maximum(roll_max, 1e-12) - 1.0
+    maxdd = dd.min(axis=0)                  # valores negativos (ex.: -0.33)
+
+    # ---------- percentis & estatísticas ----------
+    p = lambda q, x: float(np.percentile(x, q)) if x.size else np.nan
+    P5, P25, P50, P75, P95 = [p(q, final) for q in (5, 25, 50, 75, 95)]
+    cagr_med = float(np.nanmedian(cagr)) * 100
+    dd_med   = float(np.nanmedian(maxdd)) * 100
+    prob_loss = float(np.mean(final < EQ[0, :])) if np.isfinite(EQ[0, :]).all() else np.nan
+
+    # probabilidades de meta/DD (se o usuário definiu)
+    tgt = float(_g("tgt", np.nan))          # (ex.: 0.15 para 15% a.a.)
+    dd_lim = float(_g("dd_lim", np.nan))    # (ex.: -0.30 para -30%)
+    p_target = float(np.mean(cagr >= tgt)) if np.isfinite(tgt) else np.nan
+    p_dd_ok  = float(np.mean(maxdd >= dd_lim)) if np.isfinite(dd_lim) else np.nan
+
+    # Expected Shortfall (ES) dos 5% piores resultados
+    k = max(1, int(0.05 * sims))
+    es_5 = float(np.sort(final)[:k].mean()) if sims >= 20 else np.nan
+
+    # ---------- parâmetros operacionais (opcionais) ----------
+    rebalance_label   = _g("rebalance_label", None)
+    aporte_mensal     = _g("aporte_mensal", None)
+    saque_mensal      = _g("saque_mensal", None)
+    mgmt_fee_annual   = _g("mgmt_fee_annual", None)
+    perf_fee_pct      = _g("perf_fee_pct", None)
+    hurdle_annual     = _g("hurdle_annual", None)
+    h_months          = _g("h_months", None)
+    n_sims            = int(_g("n_sims", sims))
+
+    # ---------- CARD grande (HTML simples) ----------
+    def _fmt_money(x): 
+        try: return f"R$ {x:,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        except: return "—"
+    def _fmt_pct(x):
+        try: return f"{x*100:,.1f}%"
+        except: return "—"
+    def _fmt_pct_abs(x):
+        try: return f"{x:,.2f}%"
+        except: return "—"
+
+    card = f"""
+    <div style="border-radius:14px;padding:14px 18px;margin:12px 0;
+                background:linear-gradient(135deg,#0B3,#095);color:#fff">
+      <div style="font-weight:700;font-size:18px;margin-bottom:6px">
+        Resumo da Simulação — {n_sims:,} cenários • horizonte {h_months or round(steps_total/(21 if interval=='1d' else 4))} meses • intervalo {interval.upper()}
+      </div>
+      <div style="display:flex;gap:24px;flex-wrap:wrap;font-size:15px">
+        <div><b>Equity final (P5 / P50 / P95)</b><br>
+            <span style="font-size:20px">{_fmt_money(P5)}</span> /
+            <span style="font-size:20px">{_fmt_money(P50)}</span> /
+            <span style="font-size:20px">{_fmt_money(P95)}</span></div>
+        <div><b>CAGR mediano</b><br><span style="font-size:20px">{_fmt_pct_abs(cagr_med)}</span></div>
+        <div><b>MaxDD mediano</b><br><span style="font-size:20px">{_fmt_pct_abs(dd_med)}</span></div>
+        <div><b>P(perder dinheiro)</b><br><span style="font-size:20px">{_fmt_pct(prob_loss)}</span></div>
+        <div><b>ES (5% piores)</b><br><span style="font-size:20px">{_fmt_money(es_5)}</span></div>
+      </div>
+    </div>
+    """
+    st.markdown(card, unsafe_allow_html=True)
+
+    # ---------- Tabela-resumo estruturada ----------
+    data = [
+        ["Meta (CAGR)",      "—" if not np.isfinite(tgt)    else _fmt_pct(tgt),     "P(atingir meta)",    "—" if not np.isfinite(p_target) else _fmt_pct(p_target)],
+        ["Limite de DD",     "—" if not np.isfinite(dd_lim) else _fmt_pct(dd_lim),  "P(DD ≤ limite)",     "—" if not np.isfinite(p_dd_ok)   else _fmt_pct(p_dd_ok)],
+        ["Prob. perder",     "",                                                          "P(final < início)", _fmt_pct(prob_loss)],
+        ["Terminal (P5)",    _fmt_money(P5),                                             "Terminal (P50)",    _fmt_money(P50)],
+        ["Terminal (P95)",   _fmt_money(P95),                                            "ES 5% (média piores)", _fmt_money(es_5)],
+        ["CAGR mediano",     _fmt_pct_abs(cagr_med),                                     "MaxDD mediano",     _fmt_pct_abs(dd_med)],
+    ]
+    df_sum = pd.DataFrame(data, columns=["Métrica A", "Valor A", "Métrica B", "Valor B"])
+    st.dataframe(df_sum, use_container_width=True, hide_index=True)
+
+    # ---------- Observações operacionais (quando disponíveis) ----------
+    bullets = []
+    if rebalance_label: bullets.append(f"Rebalance: **{rebalance_label}**.")
+    if isinstance(aporte_mensal, (int, float)): bullets.append(f"Aporte mensal: **R$ {aporte_mensal:,.0f}**.")
+    if isinstance(saque_mensal, (int, float)) and saque_mensal>0: bullets.append(f"Saque mensal: **R$ {saque_mensal:,.0f}**.")
+    if isinstance(mgmt_fee_annual, (int, float)) and mgmt_fee_annual>0: bullets.append(f"Taxa adm.: **{mgmt_fee_annual:.2f}% a.a.**.")
+    if isinstance(perf_fee_pct, (int, float)) and perf_fee_pct>0:
+        if isinstance(hurdle_annual, (int, float)) and hurdle_annual>0:
+            bullets.append(f"Taxa de performance: **{perf_fee_pct:.0f}%** sobre lucro (hurdle **{hurdle_annual:.2f}% a.a.**).")
+        else:
+            bullets.append(f"Taxa de performance: **{perf_fee_pct:.0f}%** sobre lucro.")
+    if bullets:
+        st.markdown("**Parâmetros considerados**  \n- " + "\n- ".join(bullets))
+
+    # ---------- Exportar relatório (Markdown) ----------
+    md = io.StringIO()
+    md.write(f"# Resumo Monte Carlo\n\n")
+    md.write(f"- Cenários: **{n_sims:,}**\n")
+    md.write(f"- Horizonte: **{h_months or round(steps_total/(21 if interval=='1d' else 4))} meses** (intervalo {interval.upper()})\n")
+    md.write(f"- Capital inicial: **R$ {start_equity:,.0f}**\n\n")
+    md.write(f"## Resultados\n")
+    md.write(f"- Equity final (P5 / P50 / P95): **{_fmt_money(P5)} / {_fmt_money(P50)} / {_fmt_money(P95)}**\n")
+    md.write(f"- CAGR mediano: **{_fmt_pct_abs(cagr_med)}** • MaxDD mediano: **{_fmt_pct_abs(dd_med)}**\n")
+    md.write(f"- P(perder dinheiro): **{_fmt_pct(prob_loss)}** • ES (5% piores): **{_fmt_money(es_5)}**\n")
+    if np.isfinite(tgt):    md.write(f"- Meta (CAGR): **{_fmt_pct(tgt)}** → P(atingir): **{_fmt_pct(p_target)}**\n")
+    if np.isfinite(dd_lim): md.write(f"- Limite DD: **{_fmt_pct(dd_lim)}** → P(DD ≤ limite): **{_fmt_pct(p_dd_ok)}**\n")
+    if bullets:
+        md.write(f"\n## Parâmetros\n")
+        for b in bullets: md.write(f"- {b}\n")
+
+    st.download_button(
+        "⬇️ Baixar resumo (Markdown)",
+        data=md.getvalue().encode("utf-8"),
+        file_name="resumo_monte_carlo.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
+
