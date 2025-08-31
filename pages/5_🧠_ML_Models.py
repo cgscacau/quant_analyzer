@@ -488,9 +488,10 @@ for tab, sym in zip(tabs, equities.keys()):
 # ============================================================
 # ✅ Resumo e plano tático (experimental)
 # ============================================================
-# ===================== BLOCO FINAL — Resumo e plano tático =====================
-# ---------- Plano tático parametrizado ----------
 
+# ---------- Plano tático parametrizado (expander aberto) ----------
+import numpy as np
+import streamlit as st
 
 def _is_num(x) -> bool:
     try:
@@ -522,10 +523,9 @@ def render_tactical_plan(
     buy_threshold=0.55,
     title_suffix=" — Resumo e plano tático",
 ):
-    # --- dados seguros ---
     last_p = float(price) if _is_num(price) else np.nan
 
-    if p_series is not None and len(p_series) > 0 and _is_num(p_series.iloc[-1]):
+    if p_series is not None and hasattr(p_series, "iloc") and len(p_series) > 0 and _is_num(p_series.iloc[-1]):
         p_up = float(p_series.iloc[-1])
     elif _is_num(p_up_pred):
         p_up = float(p_up_pred)
@@ -538,8 +538,8 @@ def render_tactical_plan(
     sw_lo_v = float(sw_lo) if _is_num(sw_lo) else np.nan
     th      = float(buy_threshold) if _is_num(buy_threshold) else 0.55
 
-    with st.expander(f"🧭 {sym} {title_suffix}", expanded=False):
-        # métricas
+    with st.expander(f"🧭 {sym}{title_suffix}", expanded=True):
+        # ---- Métricas principais
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Preço",     _fmt(last_p))
         c2.metric("Prob. alta", _fmt(p_up, "pct"))
@@ -548,22 +548,18 @@ def render_tactical_plan(
 
         trend_txt = "Alta" if fast_gt_slow else "Baixa/Fraca"
         macd_txt  = "Positivo" if macd_pos else "Negativo"
-        st.caption(
-            f"Tendência: **{trend_txt}** | MACD: **{macd_txt}** | Limiar de compra: **{_fmt(th)}**"
-        )
+        st.caption(f"Tendência: **{trend_txt}** | MACD: **{macd_txt}** | Limiar de compra: **{_fmt(th)}**")
 
-        # gatilhos
         rsi_ok  = _is_num(rsi_v) and 45 <= rsi_v <= 70
         prob_ok = _is_num(p_up) and p_up >= th
         long_ok = prob_ok and fast_gt_slow and macd_pos and rsi_ok
 
-        # stop/alvo (ATR → fallback swing)
         use_atr = _is_num(atr_v) and atr_v > 0
         stop = last_p - 1.5 * atr_v if use_atr else (sw_lo_v if _is_num(sw_lo_v) else np.nan)
         tgt  = last_p + 3.0 * atr_v if use_atr else (sw_hi_v if _is_num(sw_hi_v) else np.nan)
 
         rr = np.nan
-        if _is_num(stop) and _is_num(tgt) and stop < last_p < tgt:
+        if _is_num(stop) and _is_num(tgt) and _is_num(last_p) and stop < last_p < tgt:
             risk = last_p - stop
             if risk > 0:
                 rr = (tgt - last_p) / risk
@@ -579,14 +575,12 @@ def render_tactical_plan(
             )
         else:
             faltando = []
-            if not prob_ok:   faltando.append("probabilidade acima do limiar")
-            if not fast_gt_slow: faltando.append("SMA rápida > lenta")
-            if not macd_pos:  faltando.append("MACD positivo")
-            if not rsi_ok:    faltando.append("RSI entre 45–70")
-            st.info(
-                "⏳ **Sem entrada LONG agora.** Aguarde melhor alinhamento dos sinais."
-                + (f"\n\nFaltando: {', '.join(faltando)}" if faltando else "")
-            )
+            if not prob_ok:       faltando.append("probabilidade acima do limiar")
+            if not fast_gt_slow:  faltando.append("SMA rápida > lenta")
+            if not macd_pos:      faltando.append("MACD positivo")
+            if not rsi_ok:        faltando.append("RSI entre 45–70")
+            st.info("⏳ **Sem entrada LONG agora.** Aguarde melhor alinhamento dos sinais."
+                    + (f"\n\nFaltando: {', '.join(faltando)}" if faltando else ""))
 
         obs = []
         if _is_num(sw_hi_v) and _is_num(sw_lo_v):
@@ -595,4 +589,32 @@ def render_tactical_plan(
             obs.append("Heurística: stop ≈ **1.5×ATR**, alvo ≈ **3×ATR**.")
         st.caption(" • ".join(obs) if obs else "Sem estatísticas complementares disponíveis.")
         st.caption("※ Conteúdo educacional; não é recomendação. Utilize gestão de risco.")
-# ------------------------------------------------
+# -----------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
