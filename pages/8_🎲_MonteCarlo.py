@@ -1,7 +1,9 @@
 # pages/8_🎲_MonteCarlo.py
-import streamlit as st
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
+import streamlit as st
 import plotly.graph_objects as go
 
 from core.ui import app_header
@@ -22,38 +24,122 @@ st.set_page_config(page_title="Monte Carlo", page_icon="🎲", layout="wide")
 app_header("🎲 Monte Carlo", "Cenários do portfólio: fan chart, distribuição final e probabilidades")
 
 # --------------------------------------------------------------------------------------
-# Cache de retornos
+# Helpers
 # --------------------------------------------------------------------------------------
-@st.cache_data(ttl=600)
-@st.cache_data(ttl=600)
-def _cached_returns(symbols_tuple, period, interval):
+def _get_close_series(df: pd.DataFrame) -> pd.Series | None:
+    """
+    Extrai uma Series 1-D de preços 'Close' de diferentes formatos retornados por provedores.
+    Trata:
+      - DataFrame simples com coluna "Close"
+      - DataFrame com MultiIndex nas colunas (ex: ('Close', 'AAPL'))
+      - Coluna "Close" que veio como DataFrame (ex: colunas duplicadas): pega a primeira série válida
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+
+    # Caso 1: colunas simples
+    if "Close" in df.columns and not isinstance(df["Close"], pd.DataFrame):
+        sr = pd.to_numeric(df["Close"], errors="coerce")
+        return sr.dropna()
+
+    # Caso 2: "Close" existe mas virou DataFrame (colunas duplicadas)
+    if "Close" in df.columns and isinstance(df["Close"], pd.DataFrame):
+        # pega a primeira coluna válida
+        sub = df["Close"]
+        for col in sub.columns:
+            sr = pd.to_numeric(sub[col], errors="coerce").dropna()
+            if not sr.empty:
+                sr.name = "Close"
+                return sr
+
+    # Caso 3: MultiIndex nas colunas (mutações recentes do yfinance)
+    if isinstance(df.columns, pd.MultiIndex):
+        # tenta usar o nível 0 como tipo de preço
+        try:
+            if "Close" in df.columns.get_level_values(0):
+                sub = df.xs("Close", axis=1, level=0, drop_level=False)
+                # se ainda for 2-D, pega a primeira coluna
+                if isinstance(sub, pd.DataFrame):
+                    first = sub.columns[0]
+                    sr = pd.to_numeric(sub[first], errors="coerce").dropna()
+                    sr.name = "Close"
+                    return sr
+        except Exception:
+            pass
+
+        # fallback: se houver "Adj Close" preferir ajustado
+        try:
+            if "Adj Close" in df.columns.get_level_values(0):
+                sub = df.xs("Adj Close", axis=1, level=0, drop_level=False)
+                if isinstance(sub, pd.DataFrame):
+                    first = sub.columns[0]
+                    sr = pd.to_numeric(sub[first], errors="coerce").dropna()
+                    sr.name = "Adj Close"
+                    return sr
+        except Exception:
+            pass
+
+    return None
+
+# --------------------------------------------------------------------------------------
+# Cache de retornos (robusto a MultiIndex e entradas inválidas)
+# --------------------------------------------------------------------------------------
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_returns(symbols_tuple: tuple[str, ...], period: str, interval: str) -> pd.DataFrame:
+    """
+    Baixa preços em bloco via `download_bulk`, extrai 'Close' como Series 1-D,
+    calcula retornos e concatena por colunas (inner join).
+    """
     data = download_bulk(list(symbols_tuple), period=period, interval=interval)
 
-    series_list = []
+    series_list: list[pd.Series] = []
+    bad = []
+
     for s, df in (data or {}).items():
-        if isinstance(df, pd.DataFrame) and not df.empty and "Close" in df.columns:
-            # garante tipo numérico e série de retornos com nome
-            sr = pd.to_numeric(df["Close"], errors="coerce").pct_change().dropna()
-            if not sr.empty:
-                sr.name = str(s)
-                series_list.append(sr)
+        try:
+            sr = _get_close_series(df)
+            if sr is None or sr.dropna().empty:
+                bad.append(s)
+                continue
+            sr = pd.to_numeric(sr, errors="coerce").dropna()
+            if sr.empty:
+                bad.append(s)
+                continue
+            sr = sr.astype(float).pct_change().dropna()
+            if sr.empty:
+                bad.append(s)
+                continue
+            sr.name = str(s)
+            series_list.append(sr)
+        except Exception:
+            bad.append(s)
 
     if not series_list:
-        # retorna DF vazio e deixa o chamador tratar
         return pd.DataFrame()
 
-    # concatena por coluna, alinhando por índice e limpando NaNs
+    # Concatena alinhando por índice e exigindo interseção (dados comuns)
     rets_df = pd.concat(series_list, axis=1, join="inner").dropna(how="any")
-    return rets_df
+    rets_df = rets_df.loc[:, ~rets_df.columns.duplicated()].copy()
+    rets_df = rets_df.astype(float)
 
+    # Adiciona diagnóstico ao cache (opcional)
+    if bad:
+        st.caption(f"⚠️ Sem retornos válidos para: {', '.join(map(str, bad))}")
+
+    return rets_df
 
 # --------------------------------------------------------------------------------------
 # Seleção de ativos
 # --------------------------------------------------------------------------------------
 watch = load_watchlists()
-all_syms = sorted(set(watch["BR_STOCKS"] + watch["US_STOCKS"] + watch["CRYPTO"]))
+all_syms = sorted(set(watch.get("BR_STOCKS", []) + watch.get("US_STOCKS", []) + watch.get("CRYPTO", [])))
 
-sel_from_screener = st.session_state.get("screener_selection", [])
+# Aceita ambas as chaves usadas nas outras páginas (uniformiza o app)
+_sel1 = st.session_state.get("screener_selected")
+_sel2 = st.session_state.get("screener_selection")
+sel_from_screener = [str(x) for x in ((_sel1 or []) or (_sel2 or [])) if isinstance(x, (str, bytes))]
+sel_from_screener = sorted(set(sel_from_screener))  # de-dup
+
 use_sel = st.toggle("Usar seleção do Screener (se houver)", value=bool(sel_from_screener))
 sel_count = len(sel_from_screener)
 
@@ -90,7 +176,7 @@ with st.spinner("🔄 Preparando retornos..."):
     rets_df = _cached_returns(tuple(symbols), period, interval)
 
 if rets_df.shape[1] < 2:
-    st.error("Retornos insuficientes para simular.")
+    st.error("Retornos insuficientes para simular (tente outro período/intervalo ou ajuste a lista de ativos).")
     st.stop()
 
 # --------------------------------------------------------------------------------------
@@ -100,7 +186,7 @@ st.subheader("Pesos do portfólio")
 choice = st.radio("Modo de pesos", ["Equal-Weight", "Máx. Sharpe (via Monte Carlo)", "Personalizado"], horizontal=True)
 
 if choice == "Equal-Weight":
-    weights = np.ones(len(symbols)) / len(symbols)
+    weights = np.ones(len(rets_df.columns)) / len(rets_df.columns)
     st.caption("Pesos uniformes (somam 1).")
 
 elif choice == "Máx. Sharpe (via Monte Carlo)":
@@ -117,9 +203,9 @@ elif choice == "Máx. Sharpe (via Monte Carlo)":
 
 else:  # Personalizado
     sliders = []
-    cols = st.columns(min(6, len(symbols)))
+    cols = st.columns(min(6, len(rets_df.columns)))
     for i, sym in enumerate(rets_df.columns):
-        sliders.append(cols[i % len(cols)].slider(f"{sym}", 0.0, 1.0, 1.0/len(symbols), step=0.01))
+        sliders.append(cols[i % len(cols)].slider(f"{sym}", 0.0, 1.0, 1.0/len(rets_df.columns), step=0.01))
     w = np.array(sliders, dtype=float)
     if w.sum() == 0:
         w = np.ones_like(w)
@@ -134,13 +220,13 @@ st.divider()
 # --------------------------------------------------------------------------------------
 # Parâmetros operacionais (rebalance e aportes)
 # --------------------------------------------------------------------------------------
-# passos por mês conforme intervalo
 steps_per_month = 21 if interval == "1d" else 4
 steps = int(round(h_months * steps_per_month))
 
 colA, colB = st.columns(2)
 rebalance_label = colA.selectbox("Rebalanceamento", ["Sem", "Mensal", "Trimestral", "Anual"], index=1)
 aporte_mensal  = colB.number_input("Aporte mensal (R$)", min_value=0.0, value=0.0, step=100.0)
+
 st.markdown("### Taxas e saques")
 cF1, cF2, cF3, cF4 = st.columns(4)
 mgmt_fee_annual = cF1.number_input("Taxa de administração (% a.a.)", min_value=0.0, value=0.0, step=0.1)
@@ -149,7 +235,6 @@ hurdle_annual   = cF3.number_input("Hurdle anual (% a.a.)", min_value=0.0, value
 saque_mensal    = cF4.number_input("Saque mensal (R$)", min_value=0.0, value=0.0, step=100.0)
 
 withdraw_per_step = (saque_mensal / steps_per_month) if saque_mensal > 0 else 0.0
-
 
 if interval == "1d":
     rb_map = {"Sem": 0, "Mensal": 21, "Trimestral": 63, "Anual": 252}
@@ -165,7 +250,6 @@ st.caption(
     f"Adm **{mgmt_fee_annual:.2f}% a.a.** • Perf **{perf_fee_pct:.0f}%** (hurdle **{hurdle_annual:.2f}% a.a.**) • "
     f"Saque mensal **R$ {saque_mensal:,.0f}** (≈ **R$ {withdraw_per_step:,.0f}**/passo)"
 )
-
 
 # --------------------------------------------------------------------------------------
 # Simulação
@@ -188,7 +272,6 @@ with st.spinner(f"🎲 Simulando {n_sims:,} cenários por {h_months} meses..."):
             mgmt_fee_annual=mgmt_fee_annual, perf_fee_pct=perf_fee_pct,
             hurdle_annual=hurdle_annual, withdraw_per_step=withdraw_per_step,
         )
-
 
 equity = res["equity"]  # shape: (T+1, S)
 
