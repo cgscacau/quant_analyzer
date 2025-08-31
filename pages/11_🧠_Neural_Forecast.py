@@ -239,19 +239,27 @@ def m_cnn1d():
     return keras.Model(inp, out, name="CNN1D")
 
 def m_tcn_simple():
-    # TCN minimalista (residual conv dilatada)
+    # TCN minimalista com residual corretamente dimensionado
     inp = layers.Input(shape=(lookback, n_features))
-    x = inp
+
+    # projeta canais do skip para 64 (mesma largura do ramo convolucional)
+    x = layers.Conv1D(64, 1, padding="same")(inp)
+
     for d in [1, 2, 4]:
         h = layers.Conv1D(64, 3, dilation_rate=d, padding="causal", activation="relu")(x)
         h = layers.Dropout(0.2)(h)
         h = layers.Conv1D(64, 3, dilation_rate=d, padding="causal", activation="relu")(h)
+
+        # x e h agora têm shape (batch, lookback, 64) → soma segura
         x = layers.Add()([x, h])
+
+    x = layers.LayerNormalization()(x)
     x = layers.GlobalAveragePooling1D()(x)
     x = layers.Dense(64, activation="relu")(x)
     x = layers.Dropout(0.2)(x)
     out = layers.Dense(1)(x)
     return keras.Model(inp, out, name="TCN")
+
 
 def m_transformer_min():
     # Transformer encoder mínimo
