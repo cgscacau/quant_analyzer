@@ -437,12 +437,52 @@ def portfolio_table_row(name: str,
 
 
 
+# -------------------------------------------------------
+# 1) Pegue o DataFrame de retornos que foi usado no MC
+#    (ajuste o nome da variável conforme o seu código)
+# -------------------------------------------------------
+# Se você já tem algo como `rets` (DataFrame de retornos) do passo do Monte Carlo, use-o.
+# Caso seu código chame de outro nome, ajuste aqui:
+rets_mc = rets  # <- ajuste se o seu DF de retornos tiver outro nome
+
+# Segurança: só numéricos + dropna
+rets_mc = rets_mc.select_dtypes(include=[np.number]).dropna(how="any")
+
+# -------------------------------------------------------
+# 2) Colunas usadas para gerar os pesos (referência)
+#    Geralmente guardamos no dict 'special' (quando montamos o MC) algo como special["__cols__"]
+#    Se não existir, usamos as colunas do próprio rets_mc
+# -------------------------------------------------------
+cols_ref = special.get("__cols__", list(rets_mc.columns))
+
+# -------------------------------------------------------
+# 3) Monta as linhas da tabela chamando a função com os 4 argumentos
+# -------------------------------------------------------
 rows = []
-weights_dict: dict[str, np.ndarray] = {}
-for name in ("Equal-Weight", "Max Sharpe", "Same Risk (Max Sharpe)"):
-    w = special[name]  # type: ignore
-    weights_dict[name] = w
-    rows.append(portfolio_table_row(name, w))
+labels = [
+    ("Equal-Weight", "Equal-Weight"),
+    ("Max Sharpe", "Max Sharpe"),
+    ("Same Risk (Max Sharpe)", "Same Risk (Max Sharpe)"),
+]
+
+for key, label in labels:
+    w = special.get(key, None)
+    if w is None:
+        continue
+    row = portfolio_table_row(label, w, rets_mc, cols_ref)  # <<< AQUI vai com 4 argumentos
+    rows.append(row)
+
+df_rows = pd.DataFrame(
+    rows,
+    columns=["Carteira", "Retorno anual", "Vol anual", "Sharpe", "Pesos"]
+)
+
+# Mostra sem a coluna de pesos (que pode ser grande); se quiser, coloque em um expander à parte
+st.dataframe(
+    df_rows.drop(columns=["Pesos"], errors="ignore"),
+    use_container_width=True
+)
+
 
 df_sum = pd.DataFrame(rows)
 # formatação
