@@ -119,48 +119,52 @@ def _is_fii_brazil(t: str) -> bool:
     return t.endswith("11.SA") and re.search(r"\d{2}\.SA$", t) is not None
 
 # ---------------------------- Builder principal ----------------------------
-def rebuild_watchlists(base: dict, debug: bool=False) -> dict | Tuple[dict, List[Tuple[str,str]]]:
-    """
-    Recebe um dicionário-base com chaves BR_STOCKS / US_STOCKS / CRYPTO
-    e retorna um novo dicionário com:
-      - listas filtradas por atividade recente
-      - classes: BR_FIIS, BR_DIVIDEND, BR_SMALL_CAPS, BR_BLUE_CHIPS,
-                 US_DIVIDEND, US_SMALL_CAPS, US_BLUE_CHIPS
-    Se debug=True, retorna (resultado, report) onde 'report' tem motivo por ticker.
-    """
-    br_base = base.get("BR_STOCKS", [])
-    us_base = base.get("US_STOCKS", [])
-    cr_base = base.get("CRYPTO", [])
+# use BR_STOCKS ∪ BR_FIIS como universo base
+br_base = sorted(set(base.get("BR_STOCKS", [])) | set(base.get("BR_FIIS", [])))
+us_base = base.get("US_STOCKS", [])
+cr_base = base.get("CRYPTO", [])
 
-    # 1) atividade
+def _ensure_nonempty(lst, fallback, n=50):
+    """Se a lista ficar vazia por causa do filtro/erro, usa até n do fallback."""
+    return lst if lst else list(fallback)[:n]
+
+def rebuild_watchlists(base: dict, debug: bool=False) -> dict | tuple[dict, list[tuple[str,str]]]:
+    # 1) atividade recente
     br_active, rep_br = _active_last_2m(br_base, debug=True)
     us_active, rep_us = _active_last_2m(us_base,  debug=True)
     cr_active, rep_cr = _active_last_2m(cr_base,  debug=True)
 
+    # Fallbacks: se o Yahoo limitar e vier vazio, usa a base “como está”
+    br_active = _ensure_nonempty(br_active, br_base)
+    us_active = _ensure_nonempty(us_active, us_base)
+    cr_active = _ensure_nonempty(cr_active, cr_base)
+
     # 2) classes Brasil
     br_fiis     = [t for t in br_active if _is_fii_brazil(t)]
     br_equities = [t for t in br_active if t not in br_fiis]
+    # fallback para FIIs: se vazio, tenta pegar FIIs diretamente da base
+    br_fiis = _ensure_nonempty(br_fiis, [t for t in br_base if _is_fii_brazil(t)])
+
     br_blue, br_small = _split_caps(br_equities)
-    br_div      = _div_payers(br_equities)
+    br_div           = _div_payers(br_equities)
 
     # 3) classes EUA
     us_blue, us_small = _split_caps(us_active)
-    us_div      = _div_payers(us_active)
+    us_div            = _div_payers(us_active)
 
     out = {
         "BR_STOCKS":      sorted(br_equities),
         "US_STOCKS":      sorted(us_active),
         "CRYPTO":         sorted(cr_active),
         "BR_FIIS":        sorted(br_fiis),
-        "BR_BLUE_CHIPS":  sorted(br_blue),
-        "BR_SMALL_CAPS":  sorted(br_small),
-        "BR_DIVIDEND":    sorted(br_div),
-        "US_BLUE_CHIPS":  sorted(us_blue),
-        "US_SMALL_CAPS":  sorted(us_small),
-        "US_DIVIDEND":    sorted(us_div),
+        "BR_BLUE_CHIPS":  sorted(br_blue)  or sorted(br_equities[:10]),
+        "BR_SMALL_CAPS":  sorted(br_small) or sorted(br_equities[-10:]),
+        "BR_DIVIDEND":    sorted(br_div[:20]),
+        "US_BLUE_CHIPS":  sorted(us_blue)  or sorted(us_active[:10]),
+        "US_SMALL_CAPS":  sorted(us_small) or sorted(us_active[-10:]),
+        "US_DIVIDEND":    sorted(us_div[:20]),
     }
 
     if debug:
-        report = rep_br + rep_us + rep_cr
-        return out, report
+        return out, (rep_br + rep_us + rep_cr)
     return out
