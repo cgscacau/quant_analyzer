@@ -468,3 +468,220 @@ def portfolio_table_row(label: str,
 
     return [label, mu, vol, sh, weights_dict]
 
+
+# ================================================================
+# Markowitz (analítico) — fronteira, MVP e Tangência
+# (Colar este bloco depois de `portfolio_table_row`)
+# ================================================================
+def _pinv_psd(a: np.ndarray) -> np.ndarray:
+    """Pseudoinversa estável para matrizes PSD (covariância)."""
+    try:
+        return np.linalg.pinv(a)
+    except Exception:
+        # fallback bem conservador
+        eye = np.eye(a.shape[0], dtype=float)
+        return eye
+
+def mvo_unconstrained(mu_vec: np.ndarray,
+                      cov: np.ndarray,
+                      rf: float = 0.0):
+    """
+    Retorna: w_mvp, w_tan, frontier_fn
+      - w_mvp: mínima variância global (sem restrições)
+      - w_tan: tangência (máx Sharpe) com taxa rf (sem restrições)
+      - frontier_fn(num, r_min, r_max) -> (retornos, vols, pesos) ao longo da fronteira
+    """
+    mu_vec = np.asarray(mu_vec, dtype=float).reshape(-1)
+    cov    = np.asarray(cov,    dtype=float)
+    n      = mu_vec.size
+
+    inv = _pinv_psd(cov)
+    ones = np.ones(n, dtype=float)
+
+    A = float(ones @ inv @ ones)
+    B = float(ones @ inv @ mu_vec)
+    C = float(mu_vec @ inv @ mu_vec)
+    D = float(A * C - B * B) if np.isfinite(A) and np.isfinite(B) and np.isfinite(C) else np.nan
+
+    # Mínima Variância Global (MVP)
+    w_mvp = inv @ ones
+    s = float(ones @ w_mvp)
+    w_mvp = w_mvp / (s if abs(s) > 1e-15 else 1.0)
+
+    # Tangência (máx. Sharpe) com rf
+    t = inv @ (mu_vec - rf * ones)
+    s = float(ones @ t)
+    if abs(s) > 1e-15:
+        w_tan = t / s
+    else:
+        # fallback: usa equal-weight
+        w_tan = np.ones(n) / n
+
+    def efficient_frontier(num: int = 80,
+                           r_min: float | None = None,
+                           r_max: float | None = None):
+        # Faixa de retornos-alvo
+        if r_min is None:
+            r_min = float(mu_vec.min())
+        if r_max is None:
+            r_max = float(mu_vec.max())
+        if r_min > r_max:
+            r_min, r_max = r_max, r_min
+
+        rs  = np.linspace(r_min, r_max, num=num)
+        vs  = np.zeros_like(rs, dtype=float)
+        wss = np.zeros((num, n), dtype=float)
+
+        # Fórmula fechada com A,B,C,D
+        if not (np.isfinite(D) and abs(D) > 1e-18):
+            # fronteira indisponível — retorna arrays vazios coerentes
+            return rs, np.full_like(rs, np.nan), np.tile(np.nan, (num, n))
+
+        inv1 = inv @ ones
+        invm = inv @ mu_vec
+
+        for i, r in enumerate(rs):
+            w = ((C - r * B) / D) * inv1 + ((r * A - B) / D) * invm
+            # risco (desvio padrão)
+            vs[i]  = float(np.sqrt(max(w @ cov @ w, 0.0)))
+            wss[i] = w
+        return rs, vs, wss
+
+    return w_mvp, w_tan, efficient_frontier
+
+def _long_only_clip_renorm(w: np.ndarray) -> np.ndarray:
+    """Heurística simples para long-only: zera negativos e renormaliza."""
+    w = np.maximum(w, 0.0)
+    s = float(w.sum())
+    return w / s if s > 1e-15 else w
+
+# ----------------- UI: Markowitz + comparação de carteiras -----------------
+st.markdown("### Markowitz (analítico) & Comparação de Carteiras")
+
+cA, cB, cC = st.columns([1, 1, 1])
+with cA:
+    enable_mvo = st.toggle("Ativar Markowitz (analítico)", value=True, help="Usa solução fechada sem restrições.")
+with cB:
+    enforce_longonly = st.toggle("Forçar long-only (aproximação)", value=True,
+                                 help="Heurística: zera pesos negativos e renormaliza.")
+with cC:
+    frontier_points = int(st.slider("Pontos da fronteira", 30, 200, 80, step=10))
+
+if enable_mvo:
+    mu_vec = np.asarray(special["__mu_vec__"], dtype=float)   # type: ignore
+    cov    = np.asarray(special["__cov__"],    dtype=float)   # type: ignore
+    cols   = list(special["__cols__"])                        # type: ignore
+
+    w_mvp, w_tan, frontier_fn = mvo_unconstrained(mu_vec, cov, rf=rf)
+
+    if enforce_longonly:
+        w_mvp = _long_only_clip_renorm(w_mvp)
+        w_tan = _long_only_clip_renorm(w_tan)
+
+    # Fronteira eficiente (linha)
+    r_line, v_line, w_line = frontier_fn(num=frontier_points)
+    if enforce_longonly and np.all(np.isfinite(w_line)):
+        # aplica heurística ponto-a-ponto (pode distorcer levemente a fronteira)
+        w_line = np.apply_along_axis(_long_only_clip_renorm, 1, w_line)
+        v_line = np.array([np.sqrt(max(w @ cov @ w, 0.0)) for w in w_line], dtype=float)
+        r_line = np.array([float(mu_vec @ w) for w in w_line], dtype=float)
+
+    # sobrepõe a fronteira no gráfico existente
+    fig.add_trace(go.Scatter(
+        x=v_line, y=r_line, mode="lines",
+        name="Fronteira (MVO)",
+        line=dict(width=2, dash="solid")
+    ))
+    # marca MVP e Tangência
+    mu_mvp, vol_mvp, _ = portfolio_stats(w_mvp, mu_vec, cov, rf)
+    mu_tan, vol_tan, _ = portfolio_stats(w_tan, mu_vec, cov, rf)
+    fig.add_trace(go.Scatter(
+        x=[vol_mvp], y=[mu_mvp], mode="markers+text",
+        marker=dict(size=12, symbol="triangle-up"),
+        text=["Mín. Variância"], textposition="bottom center",
+        name="Mín. Variância"
+    ))
+    fig.add_trace(go.Scatter(
+        x=[vol_tan], y=[mu_tan], mode="markers+text",
+        marker=dict(size=12, symbol="triangle-right"),
+        text=["Tangência"], textposition="bottom center",
+        name="Tangência"
+    ))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ----------------- Tabela de pesos -----------------
+    def _weights_to_df(named_weights: dict[str, np.ndarray]) -> pd.DataFrame:
+        rows = []
+        for name, w in named_weights.items():
+            row = {"Carteira": name}
+            for c, wi in zip(cols, w):
+                row[c] = wi
+            rows.append(row)
+        dfw = pd.DataFrame(rows).set_index("Carteira")
+        return dfw
+
+    named_w = {
+        "Equal-Weight": special["Equal-Weight"],                 # type: ignore
+        "Max Sharpe (MC)": special["Max Sharpe"],                # type: ignore
+        "Same Risk (MC)": special["Same Risk (Max Sharpe)"],     # type: ignore
+        "Mín. Variância (MVO)": w_mvp,
+        "Tangência (MVO)": w_tan,
+    }
+    df_weights = _weights_to_df(named_w)
+    df_weights_fmt = df_weights.applymap(lambda x: fmt_pct(x))
+
+    st.markdown("#### Pesos por carteira")
+    st.dataframe(df_weights_fmt, use_container_width=True)
+
+    # Download (CSV) dos pesos
+    st.download_button(
+        "Baixar pesos (CSV)",
+        data=df_weights.to_csv(index=True).encode("utf-8"),
+        file_name="portfolio_weights.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    # ----------------- Escolha e análise de uma carteira -----------------
+    st.markdown("#### Análise detalhada de uma carteira")
+    pick = st.selectbox(
+        "Escolha a carteira para análise",
+        list(named_w.keys()),
+        index=1
+    )
+    w_pick = np.asarray(named_w[pick], dtype=float)
+
+    # Série de retornos e curva patrimonial
+    r_pick = series_from_weights(rets, w_pick, cols_ref=cols)
+    if r_pick.dropna().empty:
+        st.warning("Série de retornos vazia para a carteira escolhida.", icon="⚠️")
+    else:
+        eq = (1 + r_pick).cumprod()
+        # métricas
+        muP, volP, shP = ann_stats(r_pick)
+        ddP = max_drawdown(eq)
+
+        # cartões/resumo
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: st.metric("Retorno (anual)", fmt_pct(muP))
+        with c2: st.metric("Vol (anual)",     fmt_pct(volP))
+        with c3: st.metric("Sharpe",          fmt_num(shP, 3))
+        with c4: st.metric("Max DD",          fmt_pct(ddP))
+
+        # gráfico curva patrimônio
+        fig_eq = px.line(eq.rename("Equity"), title=f"Curva de Patrimônio — {pick}")
+        fig_eq.update_layout(template="plotly_dark" if dark else "plotly_white")
+        st.plotly_chart(fig_eq, use_container_width=True)
+
+        # gráfico barras de pesos
+        df_bar = pd.DataFrame({"Ativo": cols, "Peso": w_pick})
+        fig_w = px.bar(df_bar, x="Ativo", y="Peso", title=f"Pesos — {pick}")
+        fig_w.update_layout(template="plotly_dark" if dark else "plotly_white")
+        st.plotly_chart(fig_w, use_container_width=True)
+
+else:
+    # Se Markowitz desativado, ainda mostramos a nuvem MC renderizada acima.
+    st.info("Markowitz (analítico) desativado. Ative a chave para ver fronteira, tangência e mínima variância.", icon="ℹ️")
+
+
+
