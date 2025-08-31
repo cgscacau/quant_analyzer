@@ -1,374 +1,376 @@
-# pages/3_🔎_Screener.py
+# pages/3_🧪_Screener.py
+
 from __future__ import annotations
 
 import math
+from datetime import datetime
+from typing import Dict, Iterable, List
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 
+# yfinance direto, para ficar autossuficiente
+import yfinance as yf
+
+
+# ======================================================================================
+# Helpers robustos
+# ======================================================================================
 
 def _flatten_col(c) -> str:
-    """Converte nomes de coluna em string plana.
-    - Se for tuple (MultiIndex), pega a última parte não vazia.
-    - Caso contrário, devolve str(c).
+    """
+    Converte nomes de coluna em string plana.
+    - Se c for tuple (MultiIndex), retorna a última parte não vazia
+    - Caso contrário, str(c)
     """
     if isinstance(c, tuple):
         for part in reversed(c):
             if isinstance(part, str) and part.strip():
                 return part
-        return "_".join(str(p) for p in c)  # fallback
+        # fallback
+        return "_".join(str(p) for p in c)
     return str(c)
 
 
-# ============================================================
-# Tentamos usar utilidades internas do projeto (se existirem)
-# ============================================================
-_dl_bulk = None
-_get_watchlists = None
+def _to_series(x) -> pd.Series:
+    """
+    Garante que x seja uma Series numérica (mesmo se vier escalar/array/list).
+    """
+    if x is None:
+        return pd.Series(dtype="float64")
+    if isinstance(x, pd.Series):
+        return pd.to_numeric(x, errors="coerce")
+    # numpy array, list, ou escalar
+    return pd.to_numeric(pd.Series(x), errors="coerce")
 
-try:
-    # baixe em lote (dict[str, pd.DataFrame]) usando a infra do projeto
-    from core.data import download_bulk as _dl_bulk  # type: ignore
-except Exception:
-    _dl_bulk = None
 
-try:
-    # carrega watchlists (dict com chaves BR_STOCKS, BR_FIIS, ..., US_STOCKS, CRYPTO etc.)
-    from core.data import load_watchlists as _get_watchlists  # type: ignore
-except Exception:
-    _get_watchlists = None
+def _ret(series_like, periods: int) -> float:
+    """
+    Retorno percentual em 'periods' períodos, robusto para qualquer entrada.
+    """
+    s = _to_series(series_like).dropna()
+    if s.size <= periods:
+        return np.nan
+    v = s.pct_change(periods=periods).iloc[-1]
+    return float(v) if pd.notna(v) else np.nan
 
-# Fallback de download com yfinance (caso não exista o do projeto)
-def _fallback_download_bulk(symbols: list[str], period: str = "6mo", interval: str = "1d") -> dict[str, pd.DataFrame]:
-    try:
-        import yfinance as yf
-    except Exception:
-        st.error("yfinance não está disponível e não há downloader interno (core.data).")
+
+def _rsi(series_like, n: int = 14) -> float:
+    """
+    RSI de n períodos (Wilder), robusto.
+    """
+    s = _to_series(series_like).dropna()
+    if s.size <= n:
+        return np.nan
+    delta = s.diff()
+    up = delta.clip(lower=0).ewm(alpha=1/n, adjust=False).mean()
+    down = (-delta.clip(upper=0)).ewm(alpha=1/n, adjust=False).mean()
+    rs = up / down
+    rsi = 100 - (100 / (1 + rs))
+    v = rsi.iloc[-1]
+    return float(v) if pd.notna(v) else np.nan
+
+
+def _sma(series_like, win: int) -> float:
+    s = _to_series(series_like).dropna()
+    if s.size < win:
+        return np.nan
+    return float(s.rolling(win).mean().iloc[-1])
+
+
+def _vol_ann(series_like) -> float:
+    """
+    Volatilidade anualizada (aprox) em %, robusto.
+    """
+    s = _to_series(series_like).dropna()
+    if s.size < 2:
+        return np.nan
+    std = s.pct_change().std()
+    if pd.isna(std):
+        return np.nan
+    return float(std * math.sqrt(252) * 100.0)
+
+
+# Formatações para style
+def _fmt_price(x):
+    return "" if pd.isna(x) else f"{x:,.2f}"
+
+def _fmt_pct(x):
+    return "" if pd.isna(x) else f"{x*100:,.2f}%"
+
+def _fmt_int(x):
+    return "" if pd.isna(x) else f"{int(x):,}"
+
+
+def _color_pct(v):
+    if pd.isna(v):
+        return ""
+    return "color:#00b894" if v >= 0 else "color:#d63031"
+
+def _color_score(v):
+    if pd.isna(v):
+        return ""
+    # escala simples 0..4
+    if v >= 3.0:
+        return "background-color:#14532d;color:#eafff0"
+    if v >= 2.0:
+        return "background-color:#166534;color:#eafff0"
+    if v >= 1.0:
+        return "background-color:#15803d;color:#f0fff7"
+    if v > 0.0:
+        return "background-color:#22c55e;color:#052e13"
+    return "background-color:#ef4444;color:#fff"
+
+
+# ======================================================================================
+# Cache de download em bloco (usa yfinance)
+# ======================================================================================
+
+@st.cache_data(show_spinner=False, ttl=60*30)  # 30 min
+def download_bulk(symbols: Iterable[str], period: str, interval: str, ver: int = 0) -> Dict[str, pd.DataFrame]:
+    """
+    Baixa OHLCV para uma lista de símbolos de forma robusta.
+    Retorna dict[symbol] -> DataFrame (index datetime, colunas ['Open','High','Low','Close','Adj Close','Volume'])
+    """
+    syms = list(dict.fromkeys([s.strip() for s in symbols if s and str(s).strip()]))  # únicos preservando ordem
+    if not syms:
         return {}
 
-    out: dict[str, pd.DataFrame] = {}
-    if not symbols:
-        return out
+    try:
+        data = yf.download(
+            tickers=" ".join(syms),
+            period=period,
+            interval=interval,
+            auto_adjust=False,
+            group_by="ticker",
+            threads=True,
+            progress=False,
+        )
+    except Exception:
+        return {}
 
-    raw = yf.download(
-        tickers=list(dict.fromkeys(symbols)),
-        period=period,
-        interval=interval,
-        group_by="ticker",
-        auto_adjust=False,
-        threads=True,
-        progress=False,
-    )
+    out: Dict[str, pd.DataFrame] = {}
 
-    # yfinance muda o formato quando é 1 ticker
-    if isinstance(raw.columns, pd.MultiIndex):
-        for s in symbols:
-            if s in raw.columns.get_level_values(0):
-                df = raw[s].copy()
-                df.columns = [c.title() for c in df.columns]  # Open/High/Low/Close/Adj Close/Volume
-                out[s] = df
+    # Quando vem 1 só ticker, o yfinance devolve DF simples (não MultiIndex)
+    if isinstance(data.columns, pd.MultiIndex):
+        # MultiIndex: (ticker, field)
+        for s in syms:
+            try:
+                df = data[s].copy()
+            except Exception:
+                continue
+            # normaliza colunas
+            df = df.copy()
+            df.columns = [_flatten_col(c).title() for c in df.columns]
+            if "Date" in df.columns:
+                df = df.set_index(pd.to_datetime(df["Date"], errors="coerce")).drop(columns=["Date"])
+            df.index.name = None
+            out[s] = df
     else:
-        # um único ticker
-        df = raw.copy()
-        df.columns = [c.title() for c in df.columns]
-        out[symbols[0]] = df
+        # Único ticker
+        df = data.copy()
+        df.columns = [_flatten_col(c).title() for c in df.columns]
+        if "Date" in df.columns:
+            df = df.set_index(pd.to_datetime(df["Date"], errors="coerce")).drop(columns=["Date"])
+        df.index.name = None
+        out[syms[0]] = df
 
     return out
 
 
-# ============================================================
-# Helpers de formatação e estilos (robustos p/ Series e escalar)
-# ============================================================
-def _fmt_price(x):
-    try:
-        return "" if pd.isna(x) else f"{float(x):,.2f}"
-    except Exception:
-        return ""
+# ======================================================================================
+# Watchlists (carrega de core.data se existir; senão um fallback enxuto)
+# ======================================================================================
 
-def _fmt_int(x):
-    try:
-        return "" if pd.isna(x) else f"{float(x):,.0f}"
-    except Exception:
-        return ""
-
-def _fmt_pct(x):
-    try:
-        return "" if pd.isna(x) else f"{float(x):+.2f}%"
-    except Exception:
-        return ""
-
-def _color_pct(v):
+def _friendly(name_key: str) -> str:
     """
-    Aceita escalar ou Series. Verde p/ >=0, vermelho p/ <0, vazio p/ NaN.
-    Retorna string (quando escalar) ou Series de strings (quando Series).
+    Converte chave técnica para um nome amigável.
     """
-    if isinstance(v, pd.Series):
-        s = pd.to_numeric(v, errors="coerce")
-        out = np.where(s >= 0, "color:#22cc71", "color:#e74c3c")
-        out = np.where(s.isna(), "", out)
-        return pd.Series(out, index=s.index)
+    mapping = {
+        "BR_STOCKS": "Brasil (Ações B3)",
+        "BR_FIIS": "Brasil (FIIs)",
+        "BR_DIVIDEND": "Brasil — Dividendos",
+        "BR_BLUE_CHIPS": "Brasil — Blue Chips",
+        "BR_SMALL_CAPS": "Brasil — Small Caps",
+        "US_STOCKS": "EUA (Ações US)",
+        "US_BLUE_CHIPS": "EUA — Blue Chips",
+        "US_SMALL_CAPS": "EUA — Small Caps",
+        "CRYPTO": "Criptos",
+    }
+    return mapping.get(name_key, name_key)
 
+
+def _load_watchlists() -> Dict[str, List[str]]:
+    # tenta usar a infra do projeto
     try:
-        f = float(v)
+        from core.data import load_watchlists as _lw  # type: ignore
+        return _lw()
     except Exception:
-        return ""
-    if np.isnan(f):
-        return ""
-    return "color:#22cc71" if f >= 0 else "color:#e74c3c"
-
-def _color_score(v):
-    """
-    Aceita escalar ou Series. Fundo verde/ vermelho conforme score.
-    """
-    def _one(f):
-        if np.isnan(f): 
-            return ""
-        if f >= 1:
-            return "background-color: rgba(34,204,113,.15)"   # verde mais forte
-        if f >= 0:
-            return "background-color: rgba(34,204,113,.05)"   # verde leve
-        return "background-color: rgba(231,76,60,.08)"        # vermelho
-
-    if isinstance(v, pd.Series):
-        s = pd.to_numeric(v, errors="coerce")
-        out = s.apply(_one)
-        out[s.isna()] = ""
-        return out
-
-    try:
-        f = float(v)
-    except Exception:
-        return ""
-    return _one(f)
+        # fallback mínimo
+        return {
+            "BR_STOCKS": ["PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA", "BBAS3.SA", "ABEV3.SA"],
+            "US_STOCKS": ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META"],
+            "CRYPTO": ["BTC-USD", "ETH-USD", "SOL-USD"],
+        }
 
 
-# ============================================================
-# Cálculos técnicos
-# ============================================================
-def _rsi14(close: pd.Series) -> float | np.floating | float:
-    close = pd.to_numeric(close, errors="coerce").dropna()
-    if len(close) < 15:
-        return np.nan
-    delta = close.diff()
-    gain = delta.clip(lower=0.0)
-    loss = -delta.clip(upper=0.0)
-    roll_up = gain.ewm(alpha=1/14, adjust=False).mean()
-    roll_down = loss.ewm(alpha=1/14, adjust=False).mean()
-    rs = roll_up / roll_down
-    rsi = 100.0 - (100.0 / (1.0 + rs))
-    return float(rsi.iloc[-1])
+# ======================================================================================
+# Página
+# ======================================================================================
 
-def _annualized_vol(ret: pd.Series, periods_per_year: int = 252) -> float:
-    ret = pd.to_numeric(ret, errors="coerce").dropna()
-    if len(ret) == 0:
-        return np.nan
-    return float(ret.std(ddof=0) * math.sqrt(periods_per_year) * 100.0)
+st.set_page_config(page_title="Screener", page_icon="🧪", layout="wide")
 
-def _sma(series: pd.Series, n: int) -> pd.Series:
-    return pd.to_numeric(series, errors="coerce").rolling(n).mean()
-
-def _trend_up(close: pd.Series) -> bool | None:
-    if len(close) < 200:
-        return None
-    sma50 = _sma(close, 50).iloc[-1]
-    sma200 = _sma(close, 200).iloc[-1]
-    if pd.isna(sma50) or pd.isna(sma200):
-        return None
-    return bool(sma50 > sma200)
-
-def _pct_change(series: pd.Series, lookback: int) -> float:
-    s = pd.to_numeric(series, errors="coerce").dropna()
-    if len(s) <= lookback:
-        return np.nan
-    try:
-        return float((s.iloc[-1] / s.iloc[-1 - lookback] - 1.0) * 100.0)
-    except Exception:
-        return np.nan
-
-def _to_float(v) -> float:
-    try:
-        return float(v)
-    except Exception:
-        return np.nan
-
-
-# ============================================================
-# UI – Controles
-# ============================================================
-st.title("🔎 Screener")
+st.title("Screener")
 st.caption("Triagem multi-ativos (BR/US/Cripto) com métricas e filtros")
 
-# Watchlists
-if _get_watchlists is not None:
-    wl = _get_watchlists()
-else:
-    wl = {
-        "BR_STOCKS": ["PETR4.SA", "VALE3.SA", "ITUB4.SA"],
-        "BR_FIIS": ["MXRF11.SA", "HGLG11.SA"],
-        "US_STOCKS": ["AAPL", "MSFT", "NVDA"],
-        "CRYPTO": ["BTC-USD", "ETH-USD", "SOL-USD"],
-        "BR_DIVIDEND": [],
-        "BR_BLUE_CHIPS": [],
-        "BR_SMALL_CAPS": [],
-        "US_BLUE_CHIPS": [],
-        "US_SMALL_CAPS": [],
-    }
-
-classes = {
-    "Brasil (Ações B3)": ("BR_STOCKS", wl.get("BR_STOCKS", [])),
-    "Brasil (FIIs)": ("BR_FIIS", wl.get("BR_FIIS", [])),
-    "Brasil — Dividendos": ("BR_DIVIDEND", wl.get("BR_DIVIDEND", [])),
-    "Brasil — Blue Chips": ("BR_BLUE_CHIPS", wl.get("BR_BLUE_CHIPS", [])),
-    "Brasil — Small Caps": ("BR_SMALL_CAPS", wl.get("BR_SMALL_CAPS", [])),
-    "EUA (Ações US)": ("US_STOCKS", wl.get("US_STOCKS", [])),
-    "EUA — Blue Chips": ("US_BLUE_CHIPS", wl.get("US_BLUE_CHIPS", [])),
-    "EUA — Small Caps": ("US_SMALL_CAPS", wl.get("US_SMALL_CAPS", [])),
-    "Criptos": ("CRYPTO", wl.get("CRYPTO", [])),
-}
+wls = _load_watchlists()
+class_options = { _friendly(k): k for k in wls.keys() }  # "Brasil (Ações B3)" -> "BR_STOCKS"
 
 with st.sidebar:
     st.header("Classe")
-    classe_label = st.selectbox(
-        "Classe",
-        list(classes.keys()),
-        index=0,
-    )
-    _, symbols = classes[classe_label]
+    class_label = st.selectbox("Classe", list(class_options.keys()))
+    wl_key = class_options[class_label]
+    symbols = wls.get(wl_key, [])
+
     st.caption(f"Total na classe: **{len(symbols)}**")
 
     st.header("Janela")
     period = st.selectbox("Período", ["6mo", "1y", "2y", "5y"], index=0)
-    interval = st.selectbox("Intervalo", ["1d", "1wk"], index=0)
+    interval = st.selectbox("Intervalo", ["1d", "1wk", "1mo"], index=0)
 
     st.header("Filtros")
-    price_min = st.number_input("Preço mínimo", value=1.0, step=0.5, format="%.2f")
-    vol_min = st.number_input("Volume médio mínimo (unid.)", value=100_000.0, step=10_000.0, format="%.0f")
-    only_trend = st.checkbox("Somente tendência de alta (SMA50>SMA200)", value=False)
+    min_price = st.number_input("Preço mínimo", min_value=0.0, value=1.0, step=0.5, format="%.2f")
+    min_avgvol = st.number_input("Volume médio mínimo (unid.)", min_value=0.0, value=100_000.0, step=50_000.0, format="%.0f")
+    only_trend_up = st.checkbox("Somente tendência de alta (SMA50>SMA200)", value=False)
 
-# ============================================================
-# Download em lote (com cache)
-# ============================================================
-@st.cache_data(show_spinner=True)
-def _download_bulk_cached(_symbols: tuple[str, ...], _period: str, _interval: str):
-    if _dl_bulk is not None:
-        return _dl_bulk(list(_symbols), period=_period, interval=_interval)
-    return _fallback_download_bulk(list(_symbols), period=_period, interval=_interval)
+    st.header("Limites")
+    max_items = st.slider("Máx. de ativos processados", 5, 120, min(60, len(symbols) or 5), step=5)
 
-# ============================================================
-# Processamento
-# ============================================================
-if not symbols:
-    st.info("Nenhum ativo nesta classe. Atualize as watchlists na página **Settings**.")
-    st.stop()
+st.write(f"Processando **{min(len(symbols), max_items)}** ativos desta classe…")
 
-st.write(f"Processando **{len(symbols)}** ativos desta classe…")
-data_dict = _download_bulk_cached(tuple(symbols), period, interval)
+# =====================================================================
+# Download
+# =====================================================================
+
+symbols = symbols[:max_items]
+ver = int(datetime.utcnow().timestamp() // (60*30))  # muda versão a cada 30min p/ invalidar cache se quiser
+data_dict = download_bulk(symbols, period, interval, ver=ver)
+
+# =====================================================================
+# Cálculo das métricas
+# =====================================================================
 
 rows = []
-for sym in symbols:
-    df = data_dict.get(sym)
+for s in symbols:
+    df = data_dict.get(s)
     if df is None or df.empty:
         continue
 
-    # --------- Padroniza nomes e garante índice como datetime (robusto p/ MultiIndex) ---------
-    raw_names = [_flatten_col(c) for c in df.columns]                 # nomes "planos" (strings)
-    cols_map  = {n.lower(): c for n, c in zip(raw_names, df.columns)} # lookup: nome plano -> coluna original
-    
-    # Se possível, renomeia p/ nomes canônicos (Open/High/Low/Close/Adj Close/Volume)
-    canon = ["open", "high", "low", "close", "adj close", "volume"]
-    rename_map = {cols_map[k]: k.title() for k in canon if k in cols_map}
-    if rename_map:
-        df = df.rename(columns=rename_map)
-    
-    # Depois disso, garante que df.columns são strings simples e "bonitas"
+    # Padroniza colunas
     df = df.copy()
     df.columns = [_flatten_col(c).title() for c in df.columns]
-    # -------------------------------------------------------------------------------------------
 
+    # Fecha e volume robustos
+    close_raw = df.get("Adj Close", df.get("Close"))
+    vol_raw = df.get("Volume")
 
-    close = pd.to_numeric(df.get("Adj Close", df.get("Close")), errors="coerce")
-    vol = pd.to_numeric(df.get("Volume"), errors="coerce")
+    close = _to_series(close_raw).dropna()
+    vol = _to_series(vol_raw)
 
-    last_price = float(close.iloc[-1]) if not pd.isna(close.iloc[-1]) else np.nan
-    avg_vol = float(vol.tail(30).mean()) if len(vol) >= 1 else np.nan
+    last_price = float(close.iloc[-1]) if not close.empty else np.nan
 
-    # Retornos percentuais (aprox. 1d, 5d, 21d, 126d, 252d)
-    d1 = _pct_change(close, 1)
-    d5 = _pct_change(close, 5)
-    m1 = _pct_change(close, 21)
-    m6 = _pct_change(close, 126)
-    y1 = _pct_change(close, 252)
+    vol_tail = vol.tail(30).dropna()
+    avg_vol = float(vol_tail.mean()) if not vol_tail.empty else np.nan
 
-    # Vol anualizada
-    ret_daily = close.pct_change()
-    vol_ann = _annualized_vol(ret_daily, periods_per_year=252)
+    # Retornos percentuais
+    d1 = _ret(close, 1)
+    d5 = _ret(close, 5)
+    m1 = _ret(close, 21)
+    m6 = _ret(close, 126)
+    y1 = _ret(close, 252)
 
-    # RSI14
-    rsi14 = _rsi14(close)
+    rsi14 = _rsi(close, 14)
+    volann = _vol_ann(close)
 
-    # Tendência
-    t_up = _trend_up(close)
+    sma50 = _sma(close, 50)
+    sma200 = _sma(close, 200)
+    trend_up = (sma50 > sma200) if (np.isfinite(sma50) and np.isfinite(sma200)) else False
 
-    # Score robusto: média dos disponíveis + bônus de tendência
-    comps = [_to_float(d1), _to_float(d5), _to_float(m1), _to_float(m6), _to_float(y1)]
-    vals = [v for v in comps if not np.isnan(v)]
-    score = np.nan if not vals else float(np.mean(vals))
-    if only_trend and t_up is False:
-        # se a pessoa pediu apenas tendência e não está em tendência, marque score NaN
+    # Score simples: média dos retornos normalizados + bônus de tendência
+    comps = [d1, d5, m1, m6, y1]
+    vals = [x for x in comps if pd.notna(x)]
+    if vals:
+        # normaliza p/ escala comparável
+        score = float(np.nanmean([np.tanh(v * 3.0) for v in vals])) * 2.0  # -2..+2 aprox
+    else:
         score = np.nan
-    elif (t_up is True) and (not np.isnan(score)):
-        score += 2.0
+    if trend_up and pd.notna(score):
+        score += 0.5
 
-    # Filtros mínimos
-    if not np.isnan(price_min) and not np.isnan(last_price) and last_price < price_min:
+    # Filtros
+    if pd.notna(last_price) and last_price < min_price:
         continue
-    if not np.isnan(vol_min) and not np.isnan(avg_vol) and avg_vol < vol_min:
+    if pd.notna(avg_vol) and avg_vol < min_avgvol:
         continue
-    if only_trend and (t_up is not True):
+    if only_trend_up and not trend_up:
         continue
 
     rows.append(
         {
-            "Symbol": sym,
+            "Symbol": s,
             "Price": last_price,
             "D1%": d1,
             "D5%": d5,
             "M1%": m1,
             "M6%": m6,
             "Y1%": y1,
-            "VolAnn%": vol_ann,
+            "VolAnn%": volann / 100.0 if pd.notna(volann) else np.nan,  # guardo em fração para formatação %
             "AvgVol": avg_vol,
             "RSI14": rsi14,
-            "TrendUp": t_up,
+            "TrendUp": trend_up,
             "Score": score,
         }
     )
 
-df = pd.DataFrame(rows)
+df_res = pd.DataFrame(rows)
 
-if df.empty:
-    st.warning("Nenhum ativo passou nos filtros. Ajuste os critérios.")
+if df_res.empty:
+    st.warning("Nenhum ativo passou pelos filtros. Ajuste os critérios.")
     st.stop()
 
-# ============================================================
 # Ordenação
-# ============================================================
-st.subheader("Ordenar por")
-order_col = st.selectbox(
+order_by = st.selectbox(
     "Ordenar por",
-    ["Score", "D1%", "D5%", "M1%", "M6%", "Y1%", "Price", "VolAnn%", "AvgVol", "RSI14", "TrendUp", "Symbol"],
+    ["Score", "M6%", "M1%", "Y1%", "D5%", "D1%", "RSI14", "VolAnn%", "AvgVol", "Price", "Symbol"],
     index=0,
 )
 ascending = st.checkbox("Ordem crescente", value=False)
-df = df.sort_values(by=order_col, ascending=ascending, kind="mergesort").reset_index(drop=True)
 
-# ============================================================
-# Tabela estilizada (cores robustas para Series/escalares)
-# ============================================================
-cols_pct = ["D1%", "D5%", "M1%", "M6%", "Y1%"]
+# Para facilitar, converto nomes se usuário escolheu label que não é idêntico
+sort_col_map = {
+    "Score": "Score",
+    "M6%": "M6%",
+    "M1%": "M1%",
+    "Y1%": "Y1%",
+    "D5%": "D5%",
+    "D1%": "D1%",
+    "RSI14": "RSI14",
+    "VolAnn%": "VolAnn%",
+    "AvgVol": "AvgVol",
+    "Price": "Price",
+    "Symbol": "Symbol",
+}
+sort_col = sort_col_map.get(order_by, "Score")
+
+df_res = df_res.sort_values(by=sort_col, ascending=ascending, kind="stable").reset_index(drop=True)
+
+# ======================================================================================
+# Tabela estilizada
+# ======================================================================================
 
 styled = (
-    df.rename(
+    df_res.rename(
         columns={
             "Symbol": "Symbol",
             "Price": "Price",
@@ -384,8 +386,8 @@ styled = (
             "Score": "Score",
         }
     )
-    .style
-    .map(_color_pct, subset=cols_pct)
+    .style  # Pylance acusa "pd.Styler" mas é isso mesmo
+    .map(_color_pct, subset=["D1%", "D5%", "M1%", "M6%", "Y1%"])
     .map(_color_score, subset=["Score"])
     .format(
         {
@@ -403,16 +405,37 @@ styled = (
     )
 )
 
-st.dataframe(styled, height=480, use_container_width=True)
+st.dataframe(styled, height=520, use_container_width=True)
 
-# ============================================================
-# Seleção p/ Backtest (opcional – id na sessão)
-# ============================================================
-st.subheader("Marque os ativos que deseja enviar para o Backtest")
-if "screener_selected" not in st.session_state:
-    st.session_state["screener_selected"] = []
+# ======================================================================================
+# Enviar seleção ao Backtest (opcional)
+# ======================================================================================
 
-# (Opcional) Botão para disponibilizar a lista atual no estado
-if st.button("Usar seleção no Backtest"):
-    st.session_state["screener_selected"] = df["Symbol"].tolist()
-    st.success("Seleção salva! Use-a na página **Backtest**.")
+with st.expander("Marque os ativos que deseja enviar para o Backtest"):
+    st.caption(
+        "Você pode marcar símbolos manualmente e depois clicar no botão para salvá-los "
+        "em `st.session_state['screener_selected']`."
+    )
+
+    # data_editor com checkbox
+    edit_df = df_res[["Symbol", "Price", "Score"]].copy()
+    edit_df.insert(0, "Select", False)
+    edited = st.data_editor(
+        edit_df,
+        num_rows="dynamic",
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Select": st.column_config.CheckboxColumn("Select"),
+        },
+        disabled=["Symbol", "Price", "Score"],
+        height=280,
+    )
+
+    selected_syms = [row.Symbol for _, row in edited.iterrows() if row.Select]
+    if st.button("Usar seleção no Backtest"):
+        st.session_state["screener_selected"] = selected_syms
+        st.success(f"{len(selected_syms)} ativo(s) enviado(s) para o Backtest.")
+
+
+st.caption("Tip: limpe os caches em **Settings** se você notar dados antigos ou quiser forçar redownload.")
