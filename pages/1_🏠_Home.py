@@ -133,3 +133,122 @@ with tab_erros:
 # Rodapé compacto do manual completo
 with st.expander("📄 Ver o Manual completo (Markdown)", expanded=False):
     st.markdown(MANUAL_MD)
+
+
+# ---- Home com Manual do Neural Forecast (cole na Home) ----
+import streamlit as st
+
+try:
+    from core.ui import app_header
+    _has_app_header = True
+except Exception:
+    _has_app_header = False
+
+st.set_page_config(page_title="Home", page_icon="🏠", layout="wide")
+(app_header("🏠 Home", "Visão geral e manuais") if _has_app_header else st.title("🏠 Home"))
+
+tabs = st.tabs(["📌 Introdução", "🧠 Manual — Neural Forecast"])
+
+with tabs[0]:
+    st.markdown("""
+**Bem-vindo!** Aqui você encontra os manuais das páginas do app.
+Use a aba **Neural Forecast** para um guia detalhado de previsão com RNAs.
+""")
+
+with tabs[1]:
+    st.markdown("# 🧠 Manual — Neural Forecast")
+    st.caption("Previsão multi-modelo (MLP, LSTM, GRU, CNN-1D, TCN, Transformer) + avaliação no teste + projeção H passos com incerteza via MC Dropout.")
+
+    st.markdown("## 1) O que esta página faz")
+    st.markdown("""
+- Baixa **OHLCV** do ticker (Yahoo).  
+- Constrói **features** (retornos, médias, RSI, volatilidade, etc.).  
+- Separa dados em **Treino → Validação → Teste** (ordem temporal, sem shuffle).  
+- Treina os modelos selecionados.  
+- Compara no **Teste** (MAE, RMSE, MAPE, direcional).  
+- Projeta o futuro por **H passos** com **MC Dropout**, gerando **fan chart** (P5…P95) e **P(Δ>0)** por horizonte.
+""")
+
+    with st.expander("### 2) Entendendo cada controle", expanded=True):
+        st.markdown("""
+- **Ticker**: qualquer ativo suportado pelo Yahoo (ex.: `ETH-USD`, `AAPL`, `PETR4.SA`).  
+- **Período** / **Intervalo**: tamanho da amostra e resolução (ex.: `2y` + `1d`).  
+- **Alvo**  
+  - **Log-return** (recomendado): aprende variação; melhor para probabilidade de alta.  
+  - **Close (nível)**: aprende o nível de preço.
+- **Janela (lookback)**: barras que entram como entrada da rede (janelas deslizantes).  
+  - Diário: **30–120**; Intraday: **60–240**.
+- **Horizonte de previsão (H)**: quantos passos no futuro (ex.: 10–20).  
+- **Proporção de Teste / Validação**: splits temporais (padrões: teste 0.20, val 0.10).  
+- **Modelos**: MLP, LSTM, GRU, CNN-1D, TCN (residual dilatado), Transformer (mínimo).  
+- **Modo de treino**:  
+  - **Rápido** ≈ 25 épocas (bom para explorar).  
+  - **Completo** ≈ 80 épocas (melhor desempenho; mais lento).
+- **Amostras MC Dropout**: 100–300 costuma ser suficiente.  
+- **Seed**: fixa resultados (ideal para comparar rodadas).
+""")
+
+    with st.expander("### 3) Pipeline de dados e treino (o que rola nos bastidores)"):
+        st.markdown("""
+1. **Pré-processamento**: `auto_adjust` de preços, remoção de `NaN`, tz aware → naive.  
+2. **Features**: `ret1`, `logret1`, `sma/ema`, `vol20`, `rsi14` (você pode estender).  
+3. **Split temporal**: Treino (70%–85%), Val (10% do treino), Teste (15%–30%).  
+4. **Normalização**: fit **só** no treino; aplica no val/teste/futuro.  
+5. **Janela deslizante**: cria tensores `(amostras, lookback, n_features)` para 1-passo.  
+6. **Treino**: EarlyStopping + ReduceLROnPlateau; perda MSE/Huber.  
+7. **Backtest 1-passo** no teste (sem look-ahead) → métricas.  
+8. **Projeção futura**: recursiva, com **dropout ativo** (MC) para quantis e `P(Δ>0)`.
+""")
+
+    with st.expander("### 4) Como interpretar os gráficos e tabelas", expanded=True):
+        st.markdown("""
+- **Faixas TREINO / VAL / TESTE**: regiões coloridas no histórico.  
+- **Tabela de métricas** (Teste):  
+  - **RMSE**/**MAE**: erro médio (quanto menor, melhor).  
+  - **MAPE**: erro percentual (cuidado com zeros).  
+  - **Direcional**: % de acertos de sinal (se alvo for retorno).  
+- **Fan chart (futuro)**:  
+  - **P50** = mediana (cenário base).  
+  - **P25–P75**: região central.  
+  - **P5–P95**: extremos plausíveis.  
+- **P(Δ>0) por horizonte**: probabilidade de alta a cada `h ∈ [1..H]`.  
+  Use como **evidência**, não garantia. Combine com tape/fluxo e gestão de risco.
+""")
+
+    with st.expander("### 5) Receitas rápidas (valores sugeridos)"):
+        st.markdown("""
+**Diário (ações/ETF/cripto)**  
+- *Exploração rápida:* `Log-return`, lookback **60**, H **10–20**, Teste **0.20**, Val **0.10**, **todos os modelos**, **Rápido**, MC=**100**.  
+- *Rodada para decisão:* **Completo**, MC=**200–300**. Compare melhores (RMSE/MAE) e probabilidade.
+
+**Intraday (1h/15m)**  
+- Lookback **120–240**, H **8–16**, MC **150–300**. Dados intraday são ruidosos → foque em horizontes curtos.
+
+**Mercados com forte regime**  
+- Aumente período (ex.: `5y`) e valorize modelos **LSTM/TCN/Transformer**.
+""")
+
+    with st.expander("### 6) Boas práticas de risco"):
+        st.markdown("""
+- Use **P25** e **P5** do seu horizonte para calibrar stop e tamanho de posição; **P50** para alvo.  
+- Se o preço real começar a rodar **abaixo de P25** de forma consistente, trate como **alerta** (mudança de regime / modelo fora).  
+- Re-treine quando chegar **novo bloco de dados** ou quando o mercado **escapar do leque**.
+""")
+
+    with st.expander("### 7) Limitações importantes"):
+        st.markdown("""
+- Métricas do **teste** refletem **um período histórico**; fora da amostra tudo pode mudar.  
+- **MC Dropout** modela parte da incerteza, mas **não todos** os riscos (eventos/gaps/liquidez).  
+- Alvo `Close (nível)` torna a leitura de `P(Δ>0)` menos direta do que `Log-return`.
+""")
+
+    with st.expander("### 8) Solução de problemas (erros comuns)"):
+        st.markdown("""
+- **`tabulate` ausente** ao salvar Markdown → adicione `tabulate>=0.9` no `requirements.txt` ou ative fallback CSV.  
+- **`UnhashableParamError`** (cache) → não cacheie funções que recebem `numpy.ndarray` (remova `@st.cache_*` do `fit`).  
+- **Erro em TCN (Add shapes)** → alinhe canais com `Conv1D(64,1)` no atalho antes do `Add`.  
+- **TensorFlow ausente** → instale variante correta no `requirements.txt` (CPU: `tensorflow>=2.16,<2.18`; Apple: `tensorflow-macos` + `tensorflow-metal`).
+""")
+
+    st.info("**Dica:** comece com `Log-return`, lookback 60, H 10–20, Teste 20%, Val 10%, todos os modelos em 'Rápido'. Se gostar do resultado, rode 'Completo' para refinar.")
+
