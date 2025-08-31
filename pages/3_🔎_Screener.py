@@ -1,6 +1,7 @@
 # pages/3_🔎_Screener.py
-import streamlit as st
+from __future__ import annotations
 import pandas as pd
+import streamlit as st
 import numpy as np
 from core.ui import app_header, ticker_selector
 from core.data import load_watchlists, download_bulk
