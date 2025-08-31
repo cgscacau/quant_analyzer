@@ -5,28 +5,52 @@ import numpy as np
 from core.ui import app_header, ticker_selector
 from core.data import load_watchlists, download_bulk
 from core.indicators import sma, rsi
+# --- Watchlists (fonte única + debug) ---------------------------------------
+import time
 from core.data import load_watchlists
 
-wl = load_watchlists()  # se houver override, ele é usado; senão, arquivo
-src = "override (memória)" if "watchlists_override" in st.session_state else "arquivo"
-st.caption(f"Watchlists: {src} — BR:{len(wl.get('BR_STOCKS',[]))} | US:{len(wl.get('US_STOCKS',[]))} | CRYPTO:{len(wl.get('CRYPTO',[]))}")
+wl = load_watchlists()
+using_override = "watchlists_override" in st.session_state
+ver = st.session_state.get("watchlists_version", 0)
 
+src = "override (memória)" if using_override else "arquivo"
+st.caption(
+    f"Watchlists: {src} • "
+    f"BR:{len(wl.get('BR_STOCKS',[]))} | "
+    f"FIIs:{len(wl.get('BR_FIIS',[]))} | "
+    f"BR Div:{len(wl.get('BR_DIVIDEND',[]))} | "
+    f"US:{len(wl.get('US_STOCKS',[]))} | "
+    f"Cripto:{len(wl.get('CRYPTO',[]))}"
+)
+
+# classes disponíveis
 CLASS_MAP = {
-    "Brasil (Ações B3)":           wl.get("BR_STOCKS", []),
-    "Brasil (FIIs)":               wl.get("BR_FIIS", []),
-    "Brasil — Blue Chips":         wl.get("BR_BLUE_CHIPS", []),
-    "Brasil — Small Caps":         wl.get("BR_SMALL_CAPS", []),
-    "Brasil — Dividendos":         wl.get("BR_DIVIDEND", []),
-    "EUA (Ações US)":              wl.get("US_STOCKS", []),
-    "EUA — Blue Chips":            wl.get("US_BLUE_CHIPS", []),
-    "EUA — Small Caps":            wl.get("US_SMALL_CAPS", []),
-    "EUA — Dividendos":            wl.get("US_DIVIDEND", []),
-    "Criptos":                     wl.get("CRYPTO", []),
+    "Brasil (Ações B3)":            wl.get("BR_STOCKS", []),
+    "Brasil (FIIs)":                wl.get("BR_FIIS", []),
+    "Brasil — Dividendos":          wl.get("BR_DIVIDEND", []),
+    "Brasil — Blue Chips":          wl.get("BR_BLUE_CHIPS", []),
+    "Brasil — Small Caps":          wl.get("BR_SMALL_CAPS", []),
+    "EUA (Ações US)":               wl.get("US_STOCKS", []),
+    "EUA — Dividendos":             wl.get("US_DIVIDEND", []),
+    "EUA — Blue Chips":             wl.get("US_BLUE_CHIPS", []),
+    "EUA — Small Caps":             wl.get("US_SMALL_CAPS", []),
+    "Criptos":                      wl.get("CRYPTO", []),
 }
 
 classe = st.selectbox("Classe", list(CLASS_MAP.keys()), index=0)
 symbols = CLASS_MAP[classe]
-st.write(f"Processando **{len(symbols)}** ativos desta classe…")
+
+# quando ficar vazio, mostre diagnóstico e atalho para atualizar
+if len(symbols) == 0:
+    with st.container():
+        st.warning("Nenhum ativo nesta classe. Motivos comuns: • watchlists não atualizadas • filtros muito restritivos • Yahoo limitou chamadas.")
+        cols = st.columns(2)
+        if cols[0].button("🔄 Atualizar watchlists (Settings)"):
+            st.switch_page("pages/9_⚙️_Settings.py")  # ajuste o caminho se o índice for outro
+        # printa as chaves que vieram vazias para ajudar
+        dbg = {k: len(v) for k, v in CLASS_MAP.items()}
+        st.code(dbg, language="json")
+
 
 
 st.set_page_config(page_title="Screener", page_icon="🔎", layout="wide")
@@ -118,6 +142,15 @@ if not symbols:
 # Download em lote
 # =======================
 data_dict = download_bulk(symbols, period=period, interval=interval)
+ver = st.session_state.get("watchlists_version", 0)
+
+@st.cache_data(ttl=600)
+def _bulk(period, interval, symbols_tuple, version):
+    from core.data import download_bulk
+    return download_bulk(list(symbols_tuple), period=period, interval=interval)
+
+data = _bulk(period, interval, tuple(symbols), ver)
+
 
 # =======================
 # Funções de métricas
