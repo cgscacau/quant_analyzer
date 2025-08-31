@@ -483,3 +483,129 @@ for tab, sym in zip(tabs, equities.keys()):
                 title=f"{sym} — Probabilidade prevista (OOF)", yaxis_title="P(up)", xaxis_title="Tempo"
             )
             st.plotly_chart(fig2, use_container_width=True)
+
+
+# ============================================================
+# ✅ Resumo e plano tático (experimental)
+# ============================================================
+st.markdown("---")
+st.subheader("Resumo e plano tático (experimental)")
+
+def _atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
+    h = df["High"].astype(float)
+    l = df["Low"].astype(float)
+    c = _choose_close_col(df).astype(float)
+    prev_c = c.shift(1)
+    tr = pd.concat([(h - l), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    return tr.rolling(n).mean()
+
+def _swing_levels(series: pd.Series, lookback: int = 20) -> tuple[float, float]:
+    """Últimas máximas/mínimas de 20 períodos (padrão)."""
+    return float(series.rolling(lookback).max().iloc[-1]), float(series.rolling(lookback).min().iloc[-1])
+
+def _macd(close: pd.Series, fast=12, slow=26, signal=9):
+    ema_f = close.ewm(span=fast, adjust=False).mean()
+    ema_s = close.ewm(span=slow, adjust=False).mean()
+    line = ema_f - ema_s
+    sig = line.ewm(span=signal, adjust=False).mean()
+    hist = line - sig
+    return line, sig, hist
+
+def _plan_for_symbol(sym: str) -> None:
+    df = bars_map.get(sym)
+    if df is None or df.empty:
+        return
+    # Garante datetime
+    if not isinstance(df.index, pd.DatetimeIndex):
+        try:
+            df = df.copy()
+            df.index = pd.to_datetime(df.index)
+        except Exception:
+            return
+
+    close = _choose_close_col(df).astype(float)
+    if close.empty:
+        return
+
+    # Indicadores (mesmos parâmetros de cima)
+    sma_f = close.rolling(sma_fast).mean()
+    sma_s = close.rolling(sma_slow).mean()
+    rsi = rsi_series(close, rsi_len)
+    macd_line, macd_sig, macd_hist = _macd(close)
+
+    atr = _atr(df, 14)
+    last_idx = close.dropna().index[-1]
+    px = float(close.loc[last_idx])
+
+    # Probabilidade do modelo (última disponível)
+    p_series = prob_series_map.get(sym)
+    p_up = float(p_series.dropna().iloc[-1]) if p_series is not None and not p_series.dropna().empty else np.nan
+
+    # Tendência e momentum
+    fast_gt_slow = bool(sma_f.iloc[-1] > sma_s.iloc[-1])
+    macd_pos = bool(macd_hist.iloc[-1] > 0)
+    rsi_val = float(rsi.iloc[-1]) if not np.isnan(rsi.iloc[-1]) else np.nan
+
+    # Swings e ATR
+    sw_hi, sw_lo = _swing_levels(close, lookback=20)
+    atr_val = float(atr.iloc[-1]) if not np.isnan(atr.iloc[-1]) else 0.0
+
+    # Regras de entrada (long) — alinhamento simples
+    reasons = []
+    if fast_gt_slow: reasons.append("SMA rápida acima da lenta (tendência de alta)")
+    else:            reasons.append("SMA rápida abaixo da lenta (tendência fraca/baixa)")
+    if macd_pos:     reasons.append("MACD>0 (impulso positivo)")
+    else:            reasons.append("MACD<0 (impulso fraco/negativo)")
+    if not np.isnan(rsi_val): reasons.append(f"RSI {rsi_val:.1f}")
+
+    # Sinal “comprar” apenas se: prob alta + tendência e impulso positivos + RSI saudável
+    go_long = (
+        (not np.isnan(p_up)) and (p_up >= buy_threshold) and
+        fast_gt_slow and macd_pos and (40 <= rsi_val <= 75)
+    )
+
+    # Stop/Alvo (2:1)
+    if atr_val <= 0:
+        # fallback simples (3% do preço)
+        risk = 0.03 * px
+    else:
+        risk = max(1.2 * atr_val, 0.01 * px)  # ATR ou 1% como mínimo
+
+    # Stop abaixo da mínima recente (protege por swing/ATR)
+    stop_candidate = px - 1.5 * risk
+    stop_lvl = min(stop_candidate, sw_lo)
+
+    target = px + 2.0 * (px - stop_lvl)  # R:R 2:1
+    rr = (target - px) / (px - stop_lvl) if px > stop_lvl else np.nan
+
+    # MENSAGEM
+    with st.expander(f"📌 {sym} — Situação e plano"):
+        st.markdown(
+            f"""
+**Preço atual:** `{px:.2f}`  |  **Prob. modelo (alta):** `{p_up:.2% if not np.isnan(p_up) else 'N/A'}`  
+**Tendência:** {'Alta' if fast_gt_slow else 'Baixa/Fraca'}  |  **MACD:** {'Positivo' if macd_pos else 'Negativo'}  |  **RSI:** `{rsi_val:.1f if not np.isnan(rsi_val) else 'N/A'}`  
+**Swing (20):** máx `{sw_hi:.2f}` | mín `{sw_lo:.2f}`  |  **ATR(14):** `{atr_val:.2f}`
+"""
+        )
+
+        if go_long:
+            st.success(
+                f"**Sinal LONG (experimental)** — condições alinhadas e probabilidade ≥ limiar ({buy_threshold:.2f}).\n"
+                f"- **Entrada:** ~ **{px:.2f}**\n"
+                f"- **Stop:** ~ **{stop_lvl:.2f}** (abaixo de mín recente / ATR)\n"
+                f"- **Alvo:** ~ **{target:.2f}** (R:R ≈ {rr:.2f})\n"
+            )
+        else:
+            st.warning(
+                "Sem entrada **LONG** no momento (condições não alinhadas). "
+                "Aguarde melhor estrutura (ex.: probabilidade mais alta, SMA rápida acima da lenta e MACD>0, RSI entre 45–70)."
+            )
+
+        st.caption("• Motivos: " + "; ".join(reasons))
+        st.caption("※ Conteúdo educacional; **não** é recomendação de investimento.")
+
+# Gera plano por ativo válido
+for sym in equities.keys():
+    _plan_for_symbol(sym)
+
+
