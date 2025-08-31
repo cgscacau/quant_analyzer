@@ -1,33 +1,43 @@
 # core/data.py
-from __future__ import annotations
-import os, json
-import pandas as pd
-import numpy as np
-import yfinance as yf
+from pathlib import Path
+import json
+import streamlit as st
 
-# ----------------------------
-# Watchlists (listas de ativos)
-# ----------------------------
-# Caminho para a pasta /data ao lado da raiz do projeto
-ROOT_DIR = os.path.dirname(os.path.dirname(__file__))       # .../quant_analyzer
-DATA_DIR = os.path.join(ROOT_DIR, "data")
-WL_PATH  = os.path.join(DATA_DIR, "watchlists.json")
+# Caminho: <raiz do projeto>/data/watchlists.json
+_WL_FILE = Path(__file__).resolve().parents[1] / "data" / "watchlists.json"
 
-def load_watchlists() -> dict:
+# Chaves esperadas (as básicas + classes adicionais)
+_WL_KEYS = [
+    "BR_STOCKS", "US_STOCKS", "CRYPTO",
+    "BR_FIIS", "BR_DIVIDEND", "BR_SMALL_CAPS", "BR_BLUE_CHIPS",
+    "US_DIVIDEND", "US_SMALL_CAPS", "US_BLUE_CHIPS",
+]
+
+@st.cache_data(ttl=86400)  # 24h – evita reabrir arquivo a cada chamada
+def _load_watchlists_file() -> dict:
+    """Lê o JSON do disco e garante as chaves mínimas."""
     try:
-        with open(WL_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        for k in ["BR_STOCKS", "US_STOCKS", "CRYPTO"]:
-            data.setdefault(k, [])
-        return data
+        data = json.loads(_WL_FILE.read_text(encoding="utf-8"))
     except Exception:
         # fallback mínimo
-        return {
-            "BR_STOCKS": ["PETR4.SA","VALE3.SA","ITUB4.SA"],
-            "US_STOCKS": ["AAPL","MSFT","NVDA"],
-            "CRYPTO": ["BTC-USD","ETH-USD","SOL-USD"]
+        data = {
+            "BR_STOCKS": ["PETR4.SA", "VALE3.SA", "ITUB4.SA"],
+            "US_STOCKS": ["AAPL", "MSFT", "NVDA"],
+            "CRYPTO":    ["BTC-USD", "ETH-USD", "SOL-USD"],
         }
+    # garante as chaves esperadas sem sobrescrever o que já existe
+    for k in _WL_KEYS:
+        data.setdefault(k, [])
+    return data
 
+def load_watchlists() -> dict:
+    """
+    Fonte única para as watchlists:
+    - Se existir 'watchlists_override' na sessão, usa-o (ex.: botão em Settings).
+    - Caso contrário, usa o arquivo em disco (cacheado por 24h).
+    """
+    override = st.session_state.get("watchlists_override")
+    return override if override else _load_watchlists_file()
 # ----------------------------
 # Helpers de normalização OHLC
 # ----------------------------
