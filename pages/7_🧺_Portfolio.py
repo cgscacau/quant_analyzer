@@ -37,11 +37,18 @@ def fmt_num(x: float | int | None, ndigits: int = 2) -> str:
 
 def ann_stats(returns: pd.Series | pd.DataFrame, periods_per_year: int = 252) -> tuple[float, float]:
     """
-    Anualiza média e desvio de retornos (diários por padrão).
+    Anualiza média e desvio de retornos.
+    Se receber DataFrame, usa a média por linha como fallback (não altera o uso no restante do código).
     """
-    mu = returns.mean() * periods_per_year
-    vol = returns.std(ddof=0) * (periods_per_year ** 0.5)
-    return (float(mu), float(vol))
+    if isinstance(returns, pd.DataFrame):
+        sr = returns.mean(axis=1)           # fallback seguro
+    else:
+        sr = returns
+
+    mu = float(sr.mean() * periods_per_year)
+    vol = float(sr.std(ddof=0) * (periods_per_year ** 0.5))
+    return mu, vol
+
 
 
 def max_drawdown(equity: pd.Series) -> float:
@@ -174,17 +181,23 @@ def build_portfolios(
     seed: int = 42,
 ) -> tuple[pd.DataFrame, dict[str, np.ndarray]]:
     """
-    Monte Carlo de portfólios com cap por ativo.
+    Monte Carlo de portfólios com cap porativo.
     Retorna:
       df_mc (mu, vol, sharpe, pesos...) e dict com carteiras especiais.
     """
+    # Sanitização
     if rets.empty or rets.shape[1] < 2:
         return pd.DataFrame(), {}
 
-    periods_per_year = 252 if rets.index.freq is None else None  # anualização padrão
-    mu_vec, _ = ann_stats(rets, periods_per_year=252)
-    mu_vec = rets.mean().values * 252  # vetor
-    cov = rets.cov().values * 252
+    # Garante apenas colunas numéricas e limpa NaN
+    rets = rets.select_dtypes(include=[np.number]).dropna(how="any")
+    if rets.empty or rets.shape[1] < 2:
+        return pd.DataFrame(), {}
+
+    # Anualização fixa (padrão diário)
+    periods = 252
+    mu_vec = rets.mean().to_numpy() * periods               # vetor de retornos anuais esperados
+    cov = rets.cov().to_numpy() * periods                   # matriz de covariância anualizada
 
     rng = np.random.default_rng(seed)
     n_assets = rets.shape[1]
@@ -192,7 +205,7 @@ def build_portfolios(
     out = np.empty((n_sims, 3 + n_assets), dtype=float)
 
     for i in range(n_sims):
-        w = random_weights(n_assets, w_cap, rng)
+        w = random_weights(n_assets, w_cap, rng)            # pesos >=0, somam 1, respeitando cap
         mu, vol, sh = portfolio_stats(w, mu_vec, cov, rf)
         out[i, 0] = mu
         out[i, 1] = vol
@@ -201,19 +214,18 @@ def build_portfolios(
 
     df_mc = pd.DataFrame(out, columns=columns)
 
-    # Equal-Weight
-    w_eq = np.ones(n_assets) / n_assets
+    # Carteiras especiais
+    w_eq = np.ones(n_assets) / n_assets                     # Equal-Weight
     mu_eq, vol_eq, sh_eq = portfolio_stats(w_eq, mu_vec, cov, rf)
 
     # Máx. Sharpe
     best = df_mc.iloc[df_mc["sharpe"].idxmax()]
-    w_best = best[3:].values
+    w_best = best[3:].to_numpy()
 
-    # “Mesmo risco do Máx. Sharpe” → procura portfólio com vol próximo
+    # Mesmo risco do Máx. Sharpe (proxy) → escolhe maior retorno entre os de vol mais próxima
     target_vol = float(best["vol"])
     df_close = df_mc.iloc[(df_mc["vol"] - target_vol).abs().argsort()[:200]]
-    # dentre os mais próximos, pega o de maior retorno (proxy para “min risk” nesse universo)
-    w_bal = df_close.iloc[df_close["mu"].idxmax()][3:].values
+    w_bal = df_close.iloc[df_close["mu"].idxmax()][3:].to_numpy()
 
     special = {
         "Equal-Weight": w_eq,
