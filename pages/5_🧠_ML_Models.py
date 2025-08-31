@@ -591,6 +591,7 @@ def render_tactical_plan(
         st.caption("※ Conteúdo educacional; não é recomendação. Utilize gestão de risco.")
 # -----------------------------------------------------------------
 
+st.caption(f"DEBUG {sym}: price={price}, p_series={None if p_series is None else len(p_series)}, rsi={rsi_val}, atr={atr_val}")
 
 
 
