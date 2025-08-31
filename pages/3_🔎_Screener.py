@@ -6,11 +6,11 @@ from core.ui import app_header, ticker_selector
 from core.data import load_watchlists, download_bulk
 from core.indicators import sma, rsi
 # --- Watchlists (fonte única + debug) ---------------------------------------
+# --- Watchlists + classe ----------------------------------------------------
 from core.data import load_watchlists
-
 wl = load_watchlists()
 
-# versão para quebrar caches quando você atualiza as watchlists na Settings
+# versão usada só para invalidar caches quando as watchlists forem atualizadas
 ver: int = int(st.session_state.get("watchlists_version", 0))
 
 st.caption(
@@ -19,7 +19,6 @@ st.caption(
     f"BR Div:{len(wl.get('BR_DIVIDEND',[]))} | US:{len(wl.get('US_STOCKS',[]))} | "
     f"Cripto:{len(wl.get('CRYPTO',[]))}"
 )
-
 
 CLASS_MAP = {
     "Brasil (Ações B3)":   wl.get("BR_STOCKS", []),
@@ -41,13 +40,22 @@ if not symbols:
     st.code({k: len(v) for k, v in CLASS_MAP.items()}, language="json")
     st.stop()
 
+# --- Controles de período / intervalo (defina ANTES de chamar _bulk) -------
+cP, cI = st.columns(2)
+with cP:
+    period = st.selectbox("Período", ["3mo", "6mo", "1y", "2y", "5y"], index=1, key="scr_period")
+with cI:
+    interval = st.selectbox("Intervalo", ["1d", "1wk"], index=0, key="scr_interval")
+
+# --- Cache de download (usa 'ver' para quebrar cache quando listas mudam) ---
 @st.cache_data(ttl=600)
-def _bulk(period, interval, symbols_tuple, version):
+def _bulk(period: str, interval: str, symbols_tuple: tuple, _version: int):
     from core.data import download_bulk
+    # _version é propositalmente não usado; serve só para invalidar o cache
     return download_bulk(list(symbols_tuple), period=period, interval=interval)
 
-data = _bulk(period, interval, tuple(symbols), ver)  # 'ver' quebra o cache após atualizar
-
+# >>> AGORA sim, com 'period' e 'interval' definidos, chame o cache:
+data = _bulk(period, interval, tuple(symbols), ver)
 
 
 
