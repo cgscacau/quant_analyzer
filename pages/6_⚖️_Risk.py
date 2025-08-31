@@ -250,3 +250,166 @@ else:
 
 # Aviso educacional
 st.caption("**Conteúdo educacional; não é recomendação. Use gestão de risco.**")
+
+#============================================================================================================================================================================================
+#============================================================================================================================================================================================
+#============================================================================================================================================================================================
+
+# ============================================================
+# 🔽 RESUMO DESCRITIVO — Kelly (fracionado)  [plug-and-play]
+# Cole a partir daqui no FINAL da página Kelly
+# ============================================================
+import io
+import math
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+# -------- helpers: pegar variáveis já existentes (globals ou session_state) ----
+def _get_any(names, default=None):
+    for n in names:
+        if n in globals(): return globals()[n]
+        if n in st.session_state: return st.session_state[n]
+    return default
+
+def _as_prob(x):
+    if x is None: return None
+    try:
+        x = float(x)
+        return x/100.0 if x > 1.0000001 else x
+    except Exception:
+        return None
+
+# tenta encontrar win rate (p) e payoff (b) usados na sua página
+p = _as_prob(_get_any(["p","wr","win_rate","winrate","wr_input","p_input"]))
+b = _get_any(["b","payoff","payoff_ratio","b_input","rr","r_risk_reward"])
+
+# histórico (opcional, se sua página preencher)
+wr_hist = _as_prob(_get_any(["wr_hist","win_rate_hist","hist_wr"]))
+b_hist  = _get_any(["b_hist","hist_b"])
+n_obs   = _get_any(["obs_validas","n_obs","n_valid"], None)
+
+# -------- validação mínima --------
+if p is None or b is None or b <= 0 or not (0 <= p <= 1):
+    st.warning("Resumo Kelly: não encontrei `p` (win rate) e/ou `b` (payoff). "
+               "Garanta que os controles estejam preenchidos.")
+else:
+    q = 1.0 - p
+    # Kelly ótimo (f*)
+    f_star = p - q / b
+    f_half = 0.5 * f_star
+    f_quar = 0.25 * f_star
+
+    # win rate mínimo para não perder dinheiro (breakeven) e payoff mínimo dado p
+    p_break = 1.0 / (1.0 + b)         # precisa de p > p_break para EV ≥ 0
+    b_min   = (q / p) if p > 0 else np.inf  # precisa de b > b_min para EV ≥ 0
+
+    # expectativa simples por trade normalizando a perda média como 1
+    # (ganha b quando acerta; perde 1 quando erra)
+    ev = p * b - q
+
+    # crescimento log (por trade) em Kelly e em 1/2 Kelly
+    def _g_log(frac: float) -> float | None:
+        # evita log(negativo) quando frac for muito grande p/ b
+        if frac is None or not np.isfinite(frac): return None
+        if frac <= -0.999 or frac*b <= -0.999:  return None
+        try:
+            return p * math.log1p(frac*b) + q * math.log1p(-frac)
+        except ValueError:
+            return None
+
+    g_kelly = _g_log(f_star)
+    g_half  = _g_log(f_half)
+    # classificação qualitativa do edge
+    if f_star <= 0:
+        label = "Desfavorável — não operar (Kelly ≤ 0)"
+        color = "#b00020"
+    elif f_star < 0.05:
+        label = "Edge fraco — use frações pequenas (¼ Kelly)"
+        color = "#d97706"
+    elif f_star < 0.15:
+        label = "Edge moderado — ½ Kelly costuma ser prudente"
+        color = "#0ea5e9"
+    else:
+        label = "Edge forte — ½ Kelly ainda é prudente"
+        color = "#16a34a"
+
+    # --------- CARD descritivo grandão ---------
+    def _fmt_pct(x, nd=2):
+        try: return f"{float(x)*100:.{nd}f}%"
+        except: return "—"
+
+    st.markdown(f"""
+    <div style="border-radius:14px;padding:14px 16px;margin:10px 0;
+                background:linear-gradient(135deg,{color},#111827);color:#fff">
+      <div style="font-weight:700;font-size:18px;margin-bottom:6px">Resumo — Kelly (fracionado)</div>
+      <div style="font-size:15px">
+        Com <b>Win Rate</b> = <b>{_fmt_pct(p)}</b> e <b>Payoff</b> = <b>{b:.2f}</b>,
+        o Kelly ótimo é <b><span style="font-size:20px">{_fmt_pct(f_star)}</span></b>.
+        <br/>Na prática, recomenda-se operar frações para reduzir drawdowns:
+        ½ Kelly = <b>{_fmt_pct(f_half)}</b> • ¼ Kelly = <b>{_fmt_pct(f_quar)}</b>.
+        <br/><br/>
+        <b>Diagnóstico:</b> {label}.
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # --------- Tabela de métricas úteis ---------
+    rows = [
+        ["Win Rate (entrada)", _fmt_pct(p),               "Payoff (entrada)",  f"{b:.2f}"],
+        ["Kelly (f*)",         _fmt_pct(f_star),          "½ Kelly",           _fmt_pct(f_half)],
+        ["¼ Kelly",            _fmt_pct(f_quar),          "EV por trade",      f"{ev:.4f} (unidades de perda)"],
+        ["Win Rate mínimo p*", _fmt_pct(p_break),         "Payoff mínimo b*",  "∞" if b_min==np.inf else f"{b_min:.2f}"],
+        ["gᵣ (Kelly)",         "—" if g_kelly is None else f"{g_kelly:.5f}",
+         "gᵣ (½ Kelly)",       "—" if g_half  is None else f"{g_half:.5f}"],
+    ]
+    # comparar com histórico, se houver
+    if wr_hist is not None and b_hist not in (None, 0):
+        f_hist = wr_hist - (1.0 - wr_hist)/b_hist
+        rows.append(["Win Rate (hist.)", _fmt_pct(wr_hist),
+                     "Payoff (hist.)",   f"{b_hist:.2f}"])
+        rows.append(["Kelly (hist.)", _fmt_pct(f_hist),
+                     "Obs. válidas",    f"{int(n_obs):,}" if isinstance(n_obs, (int, float)) and n_obs==n_obs else "—"])
+
+    df_k = pd.DataFrame(rows, columns=["Métrica A","Valor A","Métrica B","Valor B"])
+    st.dataframe(df_k, use_container_width=True, hide_index=True)
+
+    # --------- Texto interpretativo curto ---------
+    bullet = []
+    if f_star <= 0:
+        bullet.append("**Kelly ≤ 0** indica expectativa negativa com os parâmetros atuais — evite operar ou revise stops/alvos.")
+    else:
+        bullet.append("Usar **½ Kelly** reduz a volatilidade e costuma preservar ~75–80% do crescimento esperado do Kelly completo.")
+        bullet.append(f"Para **não perder dinheiro**, você precisa de **p > { _fmt_pct(p_break) }** "
+                      f"(ou **b > { '∞' if b_min==np.inf else f'{b_min:.2f}' }** dado seu win rate).")
+        bullet.append("Se o payoff vier de razão alvo/stop (R), então **b ≈ R** (ganho médio ≈ R × perda média).")
+    if wr_hist is not None and b_hist not in (None, 0):
+        bullet.append("Comparar **Entrada vs. Histórica** ajuda a validar suposições. Divergências grandes sinalizam "
+                      "overfitting ou mudança de regime.")
+
+    st.markdown("**Como ler estes números**  \n- " + "\n- ".join(bullet))
+
+    # --------- Exportar resumo (Markdown) ---------
+    md = io.StringIO()
+    md.write("# Resumo — Kelly (fracionado)\n\n")
+    md.write(f"- Win Rate (entrada): **{_fmt_pct(p)}**\n")
+    md.write(f"- Payoff (entrada): **{b:.2f}**\n")
+    md.write(f"- Kelly ótimo (f*): **{_fmt_pct(f_star)}** • ½ Kelly: **{_fmt_pct(f_half)}** • ¼ Kelly: **{_fmt_pct(f_quar)}**\n")
+    md.write(f"- EV por trade (perda=1): **{ev:.4f}**\n")
+    md.write(f"- Win Rate mínimo para EV≥0: **{_fmt_pct(p_break)}** • Payoff mínimo dado seu p: **{'∞' if b_min==np.inf else f'{b_min:.2f}'}**\n")
+    if g_kelly is not None or g_half is not None:
+        md.write(f"- Crescimento log por trade — Kelly: **{'—' if g_kelly is None else f'{g_kelly:.5f}'}**, ½ Kelly: **{'—' if g_half is None else f'{g_half:.5f}'}**\n")
+    if wr_hist is not None and b_hist not in (None, 0):
+        md.write("\n## Histórico\n")
+        md.write(f"- Win Rate (hist.): **{_fmt_pct(wr_hist)}** • Payoff (hist.): **{b_hist:.2f}**")
+        if n_obs is not None: md.write(f" • Obs. válidas: **{int(n_obs):,}**")
+        md.write("\n")
+    md.write("\n> Regra prática: operar **½ Kelly** costuma ser mais estável; ajuste conforme tolerância a drawdown.\n")
+
+    st.download_button(
+        "⬇️ Baixar resumo (Markdown)",
+        data=md.getvalue().encode("utf-8"),
+        file_name="resumo_kelly.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
