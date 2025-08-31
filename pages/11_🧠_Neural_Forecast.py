@@ -281,7 +281,7 @@ else:
 # =============================================================================
 # Treino & avaliação
 # =============================================================================
-@st.cache_resource(show_spinner=False)
+#@st.cache_resource(show_spinner=False)
 def compile_fit(model_fn, Xtr, ytr, Xva, yva, epochs: int, seed: int):
     model = model_fn()
     model.compile(optimizer=keras.optimizers.Adam(1e-3), loss="mse")
