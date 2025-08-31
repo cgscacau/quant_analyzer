@@ -532,10 +532,21 @@ def resumo_alinhado(sym, df, p_series=None, threshold=0.55):
     - threshold: limiar de compra p(up)
     """
     # -------- dados base (preço de fechamento) --------
+    # ---- Base segura: pegar o preço (px) do mesmo df do gráfico ----
     close = df["Close"] if "Close" in df.columns else (
         df.iloc[:, -1] if hasattr(df, "columns") and len(df.columns) else None
     )
-    px = _last(close)
+    if close is not None and len(close):
+        try:
+            px = float(close.iloc[-1])
+        except Exception:
+            px = float("nan")
+    else:
+        px = float("nan")
+    
+    # Compatibilidade com trechos que usam 'price'
+    price = px
+
 
     # -------- tendência simples (SMA20 vs SMA50) --------
     fast = close.rolling(20).mean() if close is not None else None
