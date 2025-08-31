@@ -295,77 +295,77 @@ def main() -> None:
     st.markdown(f"Processando **{len(symbols)}** ativos desta classe…")
 
     # 3) quebra de cache quando watchlists são atualizadas
-ver = int(st.session_state.get("watchlists_version", 0))
-
-# 3.1) modo debug (mostra os logs durante o download)
-debug_download = st.sidebar.toggle("Modo debug de download", value=False)
-
-# 4) download em lote – com status/progresso/contadores
-ok_count = 0
-empty_count = 0
-error_count = 0
-
-status_label = f"Baixando {len(symbols)} ativo(s)…"
-with st.status(status_label, expanded=debug_download) as status:
-    prog = st.progress(0.0)
-
-    # callback chamado a cada símbolo
-    def _cb(done: int, total: int, sym: str, ok: bool, reason: str):
-        nonlocal ok_count, empty_count, error_count
-        prog.progress(done / total)
-        if ok:
-            ok_count += 1
-            if debug_download:
-                st.write(f"{done}/{total} ✓ {sym}")
-        else:
-            if reason == "empty":
-                empty_count += 1
+    ver = int(st.session_state.get("watchlists_version", 0))
+    
+    # 3.1) modo debug (mostra os logs durante o download)
+    debug_download = st.sidebar.toggle("Modo debug de download", value=False)
+    
+    # 4) download em lote – com status/progresso/contadores
+    ok_count = 0
+    empty_count = 0
+    error_count = 0
+    
+    status_label = f"Baixando {len(symbols)} ativo(s)…"
+    with st.status(status_label, expanded=debug_download) as status:
+        prog = st.progress(0.0)
+    
+        # callback chamado a cada símbolo
+        def _cb(done: int, total: int, sym: str, ok: bool, reason: str):
+            nonlocal ok_count, empty_count, error_count
+            prog.progress(done / total)
+            if ok:
+                ok_count += 1
                 if debug_download:
-                    st.write(f"{done}/{total} ∅ {sym} (vazio)")
+                    st.write(f"{done}/{total} ✓ {sym}")
             else:
-                error_count += 1
-                if debug_download:
-                    st.write(f"{done}/{total} ✗ {sym} ({reason})")
-
-    # baixa todos os símbolos
-    data_dict = download_bulk(
-        symbols, period=period, interval=interval, ver=ver, callback=_cb
-    )
-
-    status.update(
-        label=f"Download concluído: {ok_count} OK, {empty_count} vazios, {error_count} erro(s).",
-        state="complete",
-    )
-
-# 5) cálculo de métricas linha a linha
-rows: list[dict] = []
-for s in symbols:
-    df = data_dict.get(s)
-    metrics = _calc_row_metrics(df)
-    if metrics:
-        row = {"Symbol": s}
-        row.update(metrics)
-        rows.append(row)
-
-if not rows:
-    st.warning(
-        f"Nenhum ativo com dados utilizáveis. "
-        f"OK: {ok_count} | Vazios: {empty_count} | Erros: {error_count}. "
-        f"Tente outro período/intervalo ou reduzir filtros."
-    )
-    st.stop()
-
-base_df = pd.DataFrame(rows)
-
-# 6) aplica filtros
-filtered = _apply_filters(base_df, price_min=price_min, vol_min=vol_min, trend_only=trend_only)
-
-# pequenos cards-resumo
-colA, colB, colC, colD = st.columns(4)
-colA.metric("Baixados OK", ok_count)
-colB.metric("Vazios", empty_count)
-colC.metric("Erros", error_count)
-colD.metric("Passaram filtros", int(filtered.shape[0]))
+                if reason == "empty":
+                    empty_count += 1
+                    if debug_download:
+                        st.write(f"{done}/{total} ∅ {sym} (vazio)")
+                else:
+                    error_count += 1
+                    if debug_download:
+                        st.write(f"{done}/{total} ✗ {sym} ({reason})")
+    
+        # baixa todos os símbolos
+        data_dict = download_bulk(
+            symbols, period=period, interval=interval, ver=ver, callback=_cb
+        )
+    
+        status.update(
+            label=f"Download concluído: {ok_count} OK, {empty_count} vazios, {error_count} erro(s).",
+            state="complete",
+        )
+    
+    # 5) cálculo de métricas linha a linha
+    rows: list[dict] = []
+    for s in symbols:
+        df = data_dict.get(s)
+        metrics = _calc_row_metrics(df)
+        if metrics:
+            row = {"Symbol": s}
+            row.update(metrics)
+            rows.append(row)
+    
+    if not rows:
+        st.warning(
+            f"Nenhum ativo com dados utilizáveis. "
+            f"OK: {ok_count} | Vazios: {empty_count} | Erros: {error_count}. "
+            f"Tente outro período/intervalo ou reduzir filtros."
+        )
+        st.stop()
+    
+    base_df = pd.DataFrame(rows)
+    
+    # 6) aplica filtros
+    filtered = _apply_filters(base_df, price_min=price_min, vol_min=vol_min, trend_only=trend_only)
+    
+    # pequenos cards-resumo
+    colA, colB, colC, colD = st.columns(4)
+    colA.metric("Baixados OK", ok_count)
+    colB.metric("Vazios", empty_count)
+    colC.metric("Erros", error_count)
+    colD.metric("Passaram filtros", int(filtered.shape[0]))
 
 # 7) ordenação (resto do seu código permanece)
 
