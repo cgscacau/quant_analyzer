@@ -491,154 +491,158 @@ for tab, sym in zip(tabs, equities.keys()):
 
 
 # ============================================================
-# 🔽 RESUMOZÃO FINAL — vencedores + situação atual por ativo
+# 🔽 RESUMO FINAL — vencedores + situação atual (mais robusto)
 # Cole a partir daqui no FINAL da página
 # ============================================================
+import numpy as np
+import pandas as pd
+import streamlit as st
 
-#import numpy as np
-#import pandas as pd
-#import streamlit as st
+# ========== CONFIG (opcional) ==========
+# Se quiser forçar o binding, descomente e ajuste:
+# PERF_DF = perf_df              # <- sua tabela com "CAGR%", "Sharpe", "MaxDD%" (do print)
+# PROBA   = proba_df             # <- dict[str, Series] ou DataFrame (colunas=ativos) com probabilidades
+# SIGNALS = signal_dict          # <- opcional: sinais prontos (-1/0/1 ou 0/1)
+# THRESH  = 0.50                 # <- limiar de probabilidade (se não houver, procuramos abaixo)
+# PRICES  = closes               # <- opcional: DataFrame de preços p/ Δ1D
 
-# ---------- helpers de formatação ----------
-def _fmt_pct_smart(v):
-    if v is None or (isinstance(v, float) and not np.isfinite(v)):
-        return "—"
-    try:
-        v = float(v)
-    except Exception:
-        return "—"
-    # se parecer probabilidade 0–1, vira %
-    return f"{(v*100 if -1.5 <= v <= 1.5 else v):.2f}%"
-
-def _coalesce(*xs):
-    for x in xs:
-        if x is not None:
-            return x
+# ========== Descoberta automática ==========
+def _get_any(name_list):
+    # procura em globals() e st.session_state (nessa ordem)
+    for nm in name_list:
+        if nm in globals():
+            return globals()[nm]
+        if hasattr(st, "session_state") and nm in st.session_state:
+            return st.session_state[nm]
     return None
 
-# ---------- (1) Tente descobrir variáveis do seu notebook ----------
-# PERF (tabela de desempenho por ativo)
-_perf_candidates = [locals().get(n) for n in ["perf", "perf_df", "strat_df", "performance_df", "strategy_df"]]
-PERF_DF = next((x for x in _perf_candidates if isinstance(x, pd.DataFrame) and len(x) > 0), None)
+PERF_DF = globals().get("PERF_DF") or _get_any(["perf_df", "perf", "strat_df", "strategy_df", "performance_df"])
+PROBA   = globals().get("PROBA")   or _get_any(["proba_df", "probas", "pred_proba", "proba_dict"])
+SIGNALS = globals().get("SIGNALS") or _get_any(["signals", "signal_dict", "sig_df"])
+THRESH  = globals().get("THRESH")  or _get_any(["prob_threshold", "threshold", "thresh", "limiar", "cutoff", "p_thresh"]) or 0.50
+PRICES  = globals().get("PRICES")  or _get_any(["prices", "close_df", "closes", "px_df"])
 
-# PROBABILIDADES (dict[str, Series] OU DataFrame col=ativo)
-_proba_candidates = [locals().get(n) for n in ["proba_dict", "pred_proba", "probas", "proba_df"]]
-PROBA = next((x for x in _proba_candidates if x is not None), None)
+# ---------- helpers ----------
+def _fmt_pct(v):
+    try:
+        v = float(v)
+        return f"{(v*100 if -1.5<=v<=1.5 else v):.2f}%"
+    except Exception:
+        return "—"
 
-# SINAIS (opcional) — dict[str, Series] OU DataFrame col=ativo (0/1, -1/0/1…)
-_signal_candidates = [locals().get(n) for n in ["signal_dict", "signals", "sig_df"]]
-SIGNALS = next((x for x in _signal_candidates if x is not None), None)
+def _last_from(obj, key):
+    """aceita dict[str, Series] ou DataFrame (col=ativo)"""
+    try:
+        if isinstance(obj, dict) and key in obj and isinstance(obj[key], pd.Series) and len(obj[key]):
+            return float(obj[key].iloc[-1])
+        if isinstance(obj, pd.DataFrame) and key in obj.columns and len(obj[key]):
+            return float(obj[key].iloc[-1])
+    except Exception:
+        pass
+    return None
 
-# LIMIAR (probability threshold)
-THRESH = _coalesce(locals().get("threshold"), locals().get("prob_threshold"), locals().get("thresh"), 0.5)
-
-# PREÇOS (opcional) — p/ variação diária
-_prices_candidates = [locals().get(n) for n in ["prices", "close_df", "closes", "px_df"]]
-PRICES = next((x for x in _prices_candidates if isinstance(x, pd.DataFrame) and len(x) > 0), None)
-
-# ---------- (2) Normalizar a tabela de performance ----------
 def _normalize_perf(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
-    # mover ativo para índice se vier em coluna
-    if d.index.name is None:
-        # tentativa: achar coluna de ativo
-        for c in ["asset", "ativo", "symbol", "ticker"]:
-            if c in [x.lower() for x in d.columns.astype(str)]:
-                real = [col for col in d.columns if col.lower() == c][0]
-                d = d.set_index(real)
-                break
-    # renomear colunas por padrão
+    # se ativo vier em coluna "Symbol"/"Ticker"/"Ativo" etc., manda para índice
+    lowcols = {c.lower(): c for c in d.columns.astype(str)}
+    for key in ["symbol","ticker","ativo","asset"]:
+        if key in lowcols:
+            d = d.set_index(lowcols[key])
+            break
+    # renomeia
     ren = {}
     for c in d.columns:
-        cl = str(c).lower().replace("%", "").strip()
+        cl = str(c).lower()
         if "cagr" in cl or "ret" in cl:
             ren[c] = "cagr"
         elif "sharpe" in cl:
             ren[c] = "sharpe"
-        elif "maxdd" in cl or ("dd" in cl and "avg" not in cl):
+        elif "maxdd" in cl or (("dd" in cl) and ("avg" not in cl)):
             ren[c] = "maxdd"
     d = d.rename(columns=ren)
-    keep = [c for c in ["cagr", "sharpe", "maxdd"] if c in d.columns]
-    return d[keep].apply(pd.to_numeric, errors="coerce")
+    keep = [c for c in ["cagr","sharpe","maxdd"] if c in d.columns]
+    d = d[keep].apply(pd.to_numeric, errors="coerce")
+    # se valores vierem em %, normaliza para 0–1 (CAGR/MaxDD)
+    if "cagr" in d and d["cagr"].max() > 3:   # heurística
+        d["cagr"] = d["cagr"] / 100.0
+    if "maxdd" in d and d["maxdd"].max() > 3:
+        d["maxdd"] = d["maxdd"] / 100.0
+    return d
 
+# ---------- valida perf ----------
 if not isinstance(PERF_DF, pd.DataFrame) or PERF_DF.empty:
-    st.warning("Resumo: não encontrei a tabela de performance (ex.: perf_df/strat_df).")
+    st.warning("Resumo: não encontrei a tabela de performance (ex.: perf_df/strat_df). "
+               "Se existir, defina `PERF_DF = perf_df` logo acima.")
 else:
-    perf_norm = _normalize_perf(PERF_DF).dropna(how="all")
-    if perf_norm.empty:
-        st.warning("Resumo: a tabela de performance não tem colunas reconhecidas (CAGR/Sharpe/MaxDD).")
+    perf = _normalize_perf(PERF_DF).dropna(how="all")
+    if perf.empty:
+        st.warning("Resumo: não identifiquei colunas de desempenho (CAGR/Sharpe/MaxDD).")
     else:
         # vencedores
-        best_cagr = perf_norm["cagr"].astype(float).idxmax() if "cagr" in perf_norm else None
-        best_sharpe = perf_norm["sharpe"].astype(float).idxmax() if "sharpe" in perf_norm else None
-        best_dd = perf_norm["maxdd"].astype(float).idxmin() if "maxdd" in perf_norm else None
+        best_cagr   = perf["cagr"].astype(float).idxmax()  if "cagr"   in perf else None
+        best_sharpe = perf["sharpe"].astype(float).idxmax() if "sharpe" in perf else None
+        best_dd     = perf["maxdd"].astype(float).idxmin()  if "maxdd"  in perf else None
+        v_cagr   = perf.loc[best_cagr, "cagr"]   if best_cagr   is not None else None
+        v_sharpe = perf.loc[best_sharpe, "sharpe"] if best_sharpe is not None else None
+        v_dd     = perf.loc[best_dd, "maxdd"]     if best_dd     is not None else None
 
-        val_cagr = perf_norm.loc[best_cagr, "cagr"] if best_cagr is not None else None
-        val_sharpe = perf_norm.loc[best_sharpe, "sharpe"] if best_sharpe is not None else None
-        val_dd = perf_norm.loc[best_dd, "maxdd"] if best_dd is not None else None
-
-        # ---------- (3) Cabeçalho “letras grandes” ----------
+        # banner grande
         st.markdown(
             f"""
-            <div style="border-radius:14px;padding:14px 16px;margin:6px 0;background:linear-gradient(135deg,#0b6,#094);color:white;font-size:15px">
-              <b>Resumo da Estratégia</b> — 
-              Melhor <b>CAGR</b>: <span style="font-size:20px">{best_cagr or '—'}</span> ({_fmt_pct_smart(val_cagr)}) &nbsp;•&nbsp;
-              Melhor <b>Sharpe</b>: <span style="font-size:20px">{best_sharpe or '—'}</span> ({val_sharpe:.2f} se disponível) &nbsp;•&nbsp;
-              Menor <b>MaxDD</b>: <span style="font-size:20px">{best_dd or '—'}</span> ({_fmt_pct_smart(val_dd)})
-            </div>
-            """,
-            unsafe_allow_html=True,
+<div style="border-radius:14px;padding:14px 16px;margin:10px 0;
+            background:linear-gradient(135deg,#0b6,#094);color:#fff;">
+  <div style="font-weight:700;font-size:16px;margin-bottom:4px">Resumo da Estratégia</div>
+  <div style="font-size:15px">
+    Melhor <b>CAGR</b>: <span style="font-size:20px">{best_cagr or '—'}</span> ({_fmt_pct(v_cagr)}) &nbsp;•&nbsp;
+    Melhor <b>Sharpe</b>: <span style="font-size:20px">{best_sharpe or '—'}</span> ({'—' if v_sharpe is None or not np.isfinite(v_sharpe) else f'{v_sharpe:.2f}'}) &nbsp;•&nbsp;
+    Menor <b>MaxDD</b>: <span style="font-size:20px">{best_dd or '—'}</span> ({_fmt_pct(v_dd)})
+  </div>
+</div>
+""",
+            unsafe_allow_html=True
         )
 
-        # ---------- (4) Situação atual por ativo ----------
-        def _last_from(obj, key):
-            """aceita dict[str, Series] OU DataFrame com colunas=ativos"""
-            try:
-                if isinstance(obj, dict) and key in obj and isinstance(obj[key], pd.Series) and len(obj[key]):
-                    return float(obj[key].iloc[-1])
-                if isinstance(obj, pd.DataFrame) and key in obj.columns and len(obj[key]):
-                    return float(obj[key].iloc[-1])
-            except Exception:
-                pass
-            return None
-
-        ativos = list(perf_norm.index.astype(str))
+        # situação atual por ativo
+        st.markdown("### Situação atual por ativo")
         rows = []
-        for a in ativos:
+        for a in perf.index.astype(str):
             p = _last_from(PROBA, a)
             s = _last_from(SIGNALS, a)
-            # regra de decisão: se tiver sinal explícito, usa; senão deriva de prob vs limiar
             if s is None and p is not None:
-                s = 1.0 if p >= float(THRESH) else 0.0
+                try:
+                    s = 1.0 if float(p) >= float(THRESH) else 0.0
+                except Exception:
+                    s = None
             estado = "LONG" if s is not None and s > 0 else ("SHORT" if s is not None and s < 0 else "OUT")
-
-            # variação diária opcional (se tiver preços)
             d1 = None
             if isinstance(PRICES, pd.DataFrame) and a in PRICES.columns and len(PRICES[a]) > 1:
                 try:
                     d1 = float(PRICES[a].iloc[-1] / PRICES[a].iloc[-2] - 1.0)
                 except Exception:
                     d1 = None
-
             rows.append({
                 "Ativo": a,
-                "Prob↑ (última)": _fmt_pct_smart(p),
-                "Limiar": _fmt_pct_smart(THRESH),
+                "Prob↑ (última)": _fmt_pct(p),
+                "Limiar": _fmt_pct(THRESH),
                 "Sinal": estado,
-                "CAGR": _fmt_pct_smart(perf_norm.loc[a, "cagr"]) if "cagr" in perf_norm else "—",
-                "Sharpe": f"{float(perf_norm.loc[a, 'sharpe']):.2f}" if "sharpe" in perf_norm and np.isfinite(perf_norm.loc[a, 'sharpe']) else "—",
-                "MaxDD": _fmt_pct_smart(perf_norm.loc[a, "maxdd"]) if "maxdd" in perf_norm else "—",
-                "Δ1D preço": _fmt_pct_smart(d1),
+                "CAGR": _fmt_pct(perf.loc[a, "cagr"]) if "cagr" in perf else "—",
+                "Sharpe": ("—" if "sharpe" not in perf or not np.isfinite(perf.loc[a,"sharpe"])
+                           else f"{float(perf.loc[a,'sharpe']):.2f}"),
+                "MaxDD": _fmt_pct(perf.loc[a, "maxdd"]) if "maxdd" in perf else "—",
+                "Δ1D preço": _fmt_pct(d1),
             })
-
-        st.markdown("### Situação atual por ativo")
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-        # ---------- (5) Cards compactos (opcional – destaques) ----------
         c1, c2, c3 = st.columns(3)
-        c1.metric("🏆 Melhor CAGR", best_cagr or "—", _fmt_pct_smart(val_cagr))
-        c2.metric("⭐ Melhor Sharpe", best_sharpe or "—", f"{val_sharpe:.2f}" if val_sharpe is not None and np.isfinite(val_sharpe) else "—")
-        c3.metric("🛡️ Menor MaxDD", best_dd or "—", _fmt_pct_smart(val_dd))
+        c1.metric("🏆 Melhor CAGR",   best_cagr or "—", _fmt_pct(v_cagr))
+        c2.metric("⭐ Melhor Sharpe", best_sharpe or "—", "—" if v_sharpe is None or not np.isfinite(v_sharpe) else f"{v_sharpe:.2f}")
+        c3.metric("🛡️ Menor MaxDD",  best_dd or "—", _fmt_pct(v_dd))
+
+
+
+
+
+
 
 
 
