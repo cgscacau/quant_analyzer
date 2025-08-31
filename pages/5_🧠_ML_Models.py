@@ -580,15 +580,23 @@ def _plan_for_symbol(sym: str) -> None:
 
     # MENSAGEM
     with st.expander(f"📌 {sym} — Situação e plano"):
+        # --- strings seguras para exibição ---
+        p_up_txt = "N/A" if (p_series is None or np.isnan(p_up)) else f"{p_up:.2%}"
+        rsi_txt  = "N/A" if np.isnan(rsi_val) else f"{rsi_val:.1f}"
+        atr_txt  = "N/A" if np.isnan(atr_val) or atr_val == 0 else f"{atr_val:.2f}"
+    
         st.markdown(
             f"""
-**Preço atual:** `{px:.2f}`  |  **Prob. modelo (alta):** `{p_up:.2% if not np.isnan(p_up) else 'N/A'}`  
-**Tendência:** {'Alta' if fast_gt_slow else 'Baixa/Fraca'}  |  **MACD:** {'Positivo' if macd_pos else 'Negativo'}  |  **RSI:** `{rsi_val:.1f if not np.isnan(rsi_val) else 'N/A'}`  
-**Swing (20):** máx `{sw_hi:.2f}` | mín `{sw_lo:.2f}`  |  **ATR(14):** `{atr_val:.2f}`
-"""
+    **Preço atual:** `{px:.2f}`  |  **Prob. modelo (alta):** `{p_up_txt}`  
+    **Tendência:** {'Alta' if fast_gt_slow else 'Baixa/Fraca'}  |  **MACD:** {'Positivo' if macd_pos else 'Negativo'}  |  **RSI:** `{rsi_txt}`  
+    **Swing (20):** máx `{sw_hi:.2f}` | mín `{sw_lo:.2f}`  |  **ATR(14):** `{atr_txt}`
+    """
         )
-
+    
         if go_long:
+            # evita divisão por zero/negativa
+            risk_dist = max(px - stop_lvl, 1e-6)
+            rr = (target - px) / risk_dist if target > px else float("nan")
             st.success(
                 f"**Sinal LONG (experimental)** — condições alinhadas e probabilidade ≥ limiar ({buy_threshold:.2f}).\n"
                 f"- **Entrada:** ~ **{px:.2f}**\n"
@@ -600,12 +608,9 @@ def _plan_for_symbol(sym: str) -> None:
                 "Sem entrada **LONG** no momento (condições não alinhadas). "
                 "Aguarde melhor estrutura (ex.: probabilidade mais alta, SMA rápida acima da lenta e MACD>0, RSI entre 45–70)."
             )
-
+    
         st.caption("• Motivos: " + "; ".join(reasons))
         st.caption("※ Conteúdo educacional; **não** é recomendação de investimento.")
 
-# Gera plano por ativo válido
-for sym in equities.keys():
-    _plan_for_symbol(sym)
 
 
