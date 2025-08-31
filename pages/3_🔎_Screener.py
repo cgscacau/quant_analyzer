@@ -223,11 +223,20 @@ for i, s in enumerate(symbols, start=1):
     trend = bool(pd.notna(sma50) and pd.notna(sma200) and sma50 > sma200)
 
     # Score simples (normalização robusta por percentuais + bônus de tendência)
-    comps = [d1, d5, m1, m6, y1]
-    vals = [x for x in comps if pd.notna(x)]
-    score = float(np.nan) if not vals else float(np.nanmean(vals))
-    if trend and not math.isnan(score):
+    def _to_float(v):
+        """Converte para float; se não for escalar, retorna NaN."""
+        try:
+            return float(v)
+        except Exception:
+            return np.nan
+    
+    comps = [_to_float(d1), _to_float(d5), _to_float(m1), _to_float(m6), _to_float(y1)]
+    vals = [v for v in comps if not np.isnan(v)]
+    score = np.nan if len(vals) == 0 else float(np.mean(vals))
+    if trend and not np.isnan(score):
         score += 2.0
+
+
 
     rows.append(
       Row(
