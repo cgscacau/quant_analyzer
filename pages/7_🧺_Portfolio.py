@@ -181,7 +181,7 @@ def build_portfolios(
     seed: int = 42,
 ) -> tuple[pd.DataFrame, dict[str, np.ndarray]]:
     """
-    Monte Carlo de portfólios com cap porativo.
+    Monte Carlo de portfólios com cap por ativo.
     Retorna:
       df_mc (mu, vol, sharpe, pesos...) e dict com carteiras especiais.
     """
@@ -194,7 +194,6 @@ def build_portfolios(
     if rets.empty or rets.shape[1] < 2:
         return pd.DataFrame(), {}
 
-    # Anualização fixa (padrão diário)
     periods = 252
     mu_vec = rets.mean().to_numpy() * periods               # vetor de retornos anuais esperados
     cov = rets.cov().to_numpy() * periods                   # matriz de covariância anualizada
@@ -222,10 +221,18 @@ def build_portfolios(
     best = df_mc.iloc[df_mc["sharpe"].idxmax()]
     w_best = best[3:].to_numpy()
 
-    # Mesmo risco do Máx. Sharpe (proxy) → escolhe maior retorno entre os de vol mais próxima
+    # “Mesmo risco” (proxy): maior retorno entre os pontos de vol mais próxima do target_vol
     target_vol = float(best["vol"])
-    df_close = df_mc.iloc[(df_mc["vol"] - target_vol).abs().argsort()[:200]]
-    w_bal = df_close.iloc[df_close["mu"].idxmax()][3:].to_numpy()
+    k = min(200, len(df_mc))
+    order = (df_mc["vol"] - target_vol).abs().argsort().values[:k]
+    df_close = df_mc.iloc[order].dropna(subset=["mu", "vol"])
+
+    if not df_close.empty:
+        idx = df_close["mu"].idxmax()       # rótulo
+        row = df_close.loc[idx]             # usa .loc
+        w_bal = row.iloc[3:].to_numpy()
+    else:
+        w_bal = w_best.copy()
 
     special = {
         "Equal-Weight": w_eq,
@@ -236,6 +243,7 @@ def build_portfolios(
         "__cols__": rets.columns.to_list(),
     }
     return df_mc, special
+
 
 
 def equity_curve(rets: pd.DataFrame, weights: np.ndarray) -> pd.Series:
