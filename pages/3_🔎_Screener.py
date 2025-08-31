@@ -5,6 +5,29 @@ import numpy as np
 from core.ui import app_header, ticker_selector
 from core.data import load_watchlists, download_bulk
 from core.indicators import sma, rsi
+from core.data import load_watchlists
+
+wl = load_watchlists()  # se houver override, ele é usado; senão, arquivo
+src = "override (memória)" if "watchlists_override" in st.session_state else "arquivo"
+st.caption(f"Watchlists: {src} — BR:{len(wl.get('BR_STOCKS',[]))} | US:{len(wl.get('US_STOCKS',[]))} | CRYPTO:{len(wl.get('CRYPTO',[]))}")
+
+CLASS_MAP = {
+    "Brasil (Ações B3)":           wl.get("BR_STOCKS", []),
+    "Brasil (FIIs)":               wl.get("BR_FIIS", []),
+    "Brasil — Blue Chips":         wl.get("BR_BLUE_CHIPS", []),
+    "Brasil — Small Caps":         wl.get("BR_SMALL_CAPS", []),
+    "Brasil — Dividendos":         wl.get("BR_DIVIDEND", []),
+    "EUA (Ações US)":              wl.get("US_STOCKS", []),
+    "EUA — Blue Chips":            wl.get("US_BLUE_CHIPS", []),
+    "EUA — Small Caps":            wl.get("US_SMALL_CAPS", []),
+    "EUA — Dividendos":            wl.get("US_DIVIDEND", []),
+    "Criptos":                     wl.get("CRYPTO", []),
+}
+
+classe = st.selectbox("Classe", list(CLASS_MAP.keys()), index=0)
+symbols = CLASS_MAP[classe]
+st.write(f"Processando **{len(symbols)}** ativos desta classe…")
+
 
 st.set_page_config(page_title="Screener", page_icon="🔎", layout="wide")
 app_header("🔎 Screener", "Triagem multi-ativos (BR/US/Cripto) com métricas e filtros")
