@@ -352,20 +352,90 @@ fig.update_layout(template="plotly_dark" if dark else "plotly_white")
 st.plotly_chart(fig, use_container_width=True)
 
 # ----------------- Tabelas e Pesos -----------------
-def portfolio_table_row(name: str, w: np.ndarray) -> dict:
-    eq = equity_curve(rets, w)
-    mu, vol, sh = ann_stats((rets @ w))
-    mu = float(mu)
-    vol = float(vol)
-    sharpe = (mu - rf) / (vol + 1e-12)
-    ddown = max_drawdown(eq)
+def series_from_weights(rets: pd.DataFrame,
+                        w: np.ndarray,
+                        cols_ref: list[str] | None = None) -> pd.Series:
+    """
+    Retorna a série de retornos do portfólio alinhando os pesos às colunas.
+    - rets: DataFrame (colunas = ativos; linhas = períodos)
+    - w: vetor de pesos (mesmo tamanho de cols_ref)
+    - cols_ref: lista de colunas usada para gerar w; se None, usa rets.columns
+    """
+    if rets.empty:
+        return pd.Series(dtype=float)
+
+    # só numéricos + limpa linhas com NaN
+    rets = rets.select_dtypes(include=[np.number]).dropna(how="any")
+    if rets.empty:
+        return pd.Series(dtype=float)
+
+    # referência de colunas que geraram w (as mesmas usadas no Monte Carlo)
+    cols = list(cols_ref) if cols_ref is not None else list(rets.columns)
+
+    # garante que só usemos colunas existentes em rets
+    cols = [c for c in cols if c in rets.columns]
+    if not cols:
+        return pd.Series(dtype=float)
+
+    # recorta/normaliza pesos para essas colunas
+    w = np.asarray(w, dtype=float).flatten()
+    if len(w) != len(cols):
+        # Se tamanhos diferem, recortamos para o mínimo
+        n = min(len(w), len(cols))
+        w = w[:n]
+        cols = cols[:n]
+
+    # pesos não-negativos e normalizados
+    w = np.clip(w, 0, 1)
+    s = w.sum()
+    if s <= 0:
+        return pd.Series(dtype=float)
+    w = w / s
+
+    # monta a série de retorno
+    R = rets[cols].to_numpy()  # (n_periodos, n_assets)
+    r = R @ w                  # (n_periodos,)
+    r = pd.Series(r, index=rets.index)
+    return r.dropna()
+
+def portfolio_table_row(name: str,
+                        w: np.ndarray,
+                        rets: pd.DataFrame,
+                        cols_ref: list[str] | None = None):
+    """
+    Monta uma linha com (nome, mu, vol, sharpe, pesos_por_ativo)
+    alinhando pesos às colunas e garantindo robustez.
+    """
+    r = series_from_weights(rets, w, cols_ref)
+    if r.empty:
+        return {
+            "Carteira": name,
+            "Retorno anual": np.nan,
+            "Vol anual": np.nan,
+            "Sharpe": np.nan,
+            "Pesos": None,
+        }
+
+    mu, vol, sh = ann_stats(r)
+    # pesos normalizados e alinhados para exibir no tooltip/tabela
+    cols = list(cols_ref) if cols_ref is not None else list(rets.columns)
+    cols = [c for c in cols if c in rets.columns]
+    w = np.asarray(w, dtype=float).flatten()
+    n = min(len(w), len(cols))
+    w = np.clip(w[:n], 0, 1)
+    if w.sum() > 0:
+        w = w / w.sum()
+    pesos_dict = dict(zip(cols[:n], w.tolist()))
+
     return {
         "Carteira": name,
-        "Retorno (CAGR)": mu,
-        "Vol (ann)": vol,
-        "Sharpe": sharpe,
-        "MaxDD": ddown,
+        "Retorno anual": mu,
+        "Vol anual": vol,
+        "Sharpe": sh,
+        "Pesos": pesos_dict,
     }
+
+
 
 rows = []
 weights_dict: dict[str, np.ndarray] = {}
