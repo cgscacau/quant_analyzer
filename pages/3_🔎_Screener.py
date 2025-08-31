@@ -10,9 +10,11 @@ import streamlit as st
 
 from core.data import load_watchlists, download_bulk
 
-# -----------------------------------------------------------------------------
-# Mapas de classes (UI -> chaves internas das watchlists)
-# -----------------------------------------------------------------------------
+pd.options.mode.copy_on_write = True
+
+# =============================================================================
+# Mapeamento de classes (rótulo UI -> chave das watchlists)
+# =============================================================================
 CLASS_MAP = {
     "Brasil (Ações B3)": "BR_STOCKS",
     "Brasil (FIIs)": "BR_FIIS",
@@ -26,10 +28,9 @@ CLASS_MAP = {
     "Criptos": "CRYPTO",
 }
 
-
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Utilidades de métricas
-# -----------------------------------------------------------------------------
+# =============================================================================
 def _safe_pct(series: pd.Series, period: int) -> float:
     """Retorno percentual para 'period' barras (fechamento)."""
     try:
@@ -80,10 +81,9 @@ def _ann_vol(close: pd.Series) -> float:
 
 def _avg_volume(volume: pd.Series, n: int = 20) -> float:
     try:
-        if "int" in str(volume.dtype) or "float" in str(volume.dtype):
-            return float(volume.tail(n).mean())
-        # alguns feeds retornam volume vazio para cripto; retorna NaN
-        return np.nan
+        if volume is None:
+            return np.nan
+        return float(volume.tail(n).mean())
     except Exception:
         return np.nan
 
@@ -98,12 +98,12 @@ def _trend_up(close: pd.Series) -> bool:
 
 def _score(row: pd.Series) -> float:
     """
-    Score simples (0..100): baseia-se em tendência, retornos recentes e RSI.
-    Você pode ajustar pesos e cortes conforme sua preferência.
+    Score simples (0..100): tendência, retornos recentes, RSI e volatilidade.
+    Ajuste pesos conforme preferir.
     """
     score = 0.0
 
-    # tendência pesa bastante
+    # tendência
     if row.get("TrendUp", False):
         score += 35.0
 
@@ -115,7 +115,7 @@ def _score(row: pd.Series) -> float:
             add += np.clip(v, -10, 10) * (w / 40.0)
     score += np.clip(add, -25, 25)
 
-    # RSI “saudável” (entre 45..70)
+    # RSI
     rsi = row.get("RSI14", np.nan)
     if not np.isnan(rsi):
         if 45 <= rsi <= 70:
@@ -123,7 +123,7 @@ def _score(row: pd.Series) -> float:
         elif rsi < 30 or rsi > 80:
             score -= 10.0
 
-    # penaliza volatilidade muito alta
+    # volatilidade
     vol = row.get("VolAnn%", np.nan)
     if not np.isnan(vol):
         if vol > 80:
@@ -134,11 +134,10 @@ def _score(row: pd.Series) -> float:
     return float(np.clip(score, 0.0, 100.0))
 
 
-# -----------------------------------------------------------------------------
-# Construção da página
-# -----------------------------------------------------------------------------
-def _ui_sidebar(wl: dict) -> Tuple[List[str], str, str, str, float, float, bool, int]:
-    """UI da sidebar: seleção de classe + filtros, retorna parâmetros."""
+# =============================================================================
+# UI auxiliar
+# =============================================================================
+def _ui_sidebar(wl: dict) -> Tuple[List[str], str, str, str, float, float, bool, int, bool]:
     with st.sidebar:
         st.markdown("### Classe")
         class_label = st.selectbox(
@@ -163,7 +162,9 @@ def _ui_sidebar(wl: dict) -> Tuple[List[str], str, str, str, float, float, bool,
             st.slider("Máx. de ativos processados", min_value=10, max_value=200, value=min(60, len(symbols)))
         )
 
-    return symbols, class_label, period, interval, price_min, vol_min, trend_only, max_items
+        debug_download = st.toggle("Modo debug de download", value=False)
+
+    return symbols, class_label, period, interval, price_min, vol_min, trend_only, max_items, debug_download
 
 
 def _expander_criterios() -> None:
@@ -181,9 +182,7 @@ def _expander_criterios() -> None:
 
 **Filtros**
 - **Preço mínimo** e **Volume médio mínimo** atuam sobre `Price` e `AvgVol`.
-- Se você marcar **Somente tendência de alta**, apenas ativos com `SMA50>SMA200` passam.
-
-Os pesos do **Score** podem ser ajustados no código conforme sua preferência.
+- Se marcar **Somente tendência de alta**, apenas ativos com `SMA50>SMA200` passam.
 """
         )
 
@@ -205,9 +204,7 @@ def _calc_row_metrics(df: pd.DataFrame) -> Dict[str, float | bool]:
     vol_ann = _ann_vol(close)
     rsi14 = _rsi_wilder(close, 14)
 
-    # volume pode não existir em alguns feeds (ex.: várias criptos)
     avgvol = _avg_volume(df["Volume"], 20) if "Volume" in df.columns else np.nan
-
     trend = _trend_up(close)
 
     row = {
@@ -231,7 +228,6 @@ def _apply_filters(df: pd.DataFrame, price_min: float, vol_min: float, trend_onl
     if "Price" in out.columns:
         out = out[out["Price"].fillna(0) >= price_min]
     if "AvgVol" in out.columns:
-        # quando AvgVol é NaN (ex.: cripto), trate como 0 para o filtro
         out = out[out["AvgVol"].fillna(0) >= vol_min]
     if trend_only and "TrendUp" in out.columns:
         out = out[out["TrendUp"] == True]  # noqa: E712
@@ -239,18 +235,12 @@ def _apply_filters(df: pd.DataFrame, price_min: float, vol_min: float, trend_onl
 
 
 def _data_editor_selection(df: pd.DataFrame) -> List[str]:
-    """
-    Exibe um editor com checkbox de seleção.
-    Retorna a lista de símbolos selecionados.
-    """
+    """Tabela com checkbox para escolher papéis e enviar ao Backtest."""
     if df.empty:
         return []
-
     editable = df.copy()
     if "Select" not in editable.columns:
         editable.insert(0, "Select", False)
-
-    # data_editor para permitir marcar
     edited = st.data_editor(
         editable,
         hide_index=True,
@@ -259,19 +249,21 @@ def _data_editor_selection(df: pd.DataFrame) -> List[str]:
         column_config={"Select": st.column_config.CheckboxColumn(required=False)},
         key="screener_table_editor",
     )
-
     selected = edited.loc[edited["Select"] == True, "Symbol"].tolist() if "Select" in edited.columns else []  # noqa: E712
     return selected
 
 
+# =============================================================================
+# Página principal
+# =============================================================================
 def main() -> None:
     st.title("Screener")
     st.caption("Triagem multi-ativos (BR/US/Cripto) com métricas e filtros")
 
-    # 1) Carrega watchlists (arquivo ou override da Settings)
+    # 1) Watchlists
     wl = load_watchlists()
 
-    # 2) UI lateral (classe + filtros)
+    # 2) UI lateral
     (
         symbols,
         class_label,
@@ -281,6 +273,7 @@ def main() -> None:
         vol_min,
         trend_only,
         max_items,
+        debug_download,
     ) = _ui_sidebar(wl)
 
     _expander_criterios()
@@ -289,18 +282,13 @@ def main() -> None:
         st.warning("Nenhum ativo nesta classe. Atualize as watchlists em **Settings** ou reduza filtros.")
         st.stop()
 
-    # limita quantidade a processar
+    # limita quantidade
     symbols = symbols[:max_items]
 
-    st.markdown(f"Processando **{len(symbols)}** ativos desta classe…")
-
-    # 3) quebra de cache quando watchlists são atualizadas
+    # 3) versão das watchlists para quebrar o cache
     ver = int(st.session_state.get("watchlists_version", 0))
 
-    # 3.1) modo debug (mostra os logs durante o download)
-    debug_download = st.sidebar.toggle("Modo debug de download", value=False)
-
-    # 4) download em lote – com status/progresso/contadores
+    # 4) download com barra de progresso e contadores
     ok_count = 0
     empty_count = 0
     error_count = 0
@@ -324,20 +312,34 @@ def main() -> None:
                 if debug_download:
                     st.write(f"{done}/{total} ✗ {sym} ({reason})")
 
+    # status com fallback se a função não aceitar callback
     with st.status(f"Baixando {len(symbols)} ativo(s)…", expanded=debug_download) as status:
         prog = st.progress(0.0)
-
-        data_dict = download_bulk(
-            symbols, period=period, interval=interval, ver=ver, callback=_cb
-        )
+        try:
+            data_dict = download_bulk(
+                symbols, period=period, interval=interval, ver=ver, callback=_cb
+            )
+        except TypeError:
+            # versão antiga de download_bulk sem callback
+            data_dict = download_bulk(symbols, period=period, interval=interval, ver=ver)
+            # estimativa simples para contadores
+            for s in symbols:
+                df = data_dict.get(s)
+                if df is None:
+                    error_count += 1
+                elif df.empty:
+                    empty_count += 1
+                else:
+                    ok_count += 1
+            prog.progress(1.0)
 
         status.update(
             label=f"Download concluído: {ok_count} OK, {empty_count} vazios, {error_count} erro(s).",
             state="complete",
         )
 
-    # 5) cálculo de métricas linha a linha
-    rows: list[dict] = []
+    # 5) métricas
+    rows: List[Dict] = []
     for s in symbols:
         df = data_dict.get(s)
         metrics = _calc_row_metrics(df)
@@ -356,10 +358,10 @@ def main() -> None:
 
     base_df = pd.DataFrame(rows)
 
-    # 6) aplica filtros
+    # 6) filtros
     filtered = _apply_filters(base_df, price_min=price_min, vol_min=vol_min, trend_only=trend_only)
 
-    # Resumo em cards
+    # cards-resumo
     colA, colB, colC, colD = st.columns(4)
     colA.metric("Baixados OK", ok_count)
     colB.metric("Vazios", empty_count)
@@ -388,7 +390,7 @@ def main() -> None:
     st.divider()
     st.markdown("### Marque os ativos que deseja enviar para o Backtest")
 
-    # 9) editor com checkbox para seleção e envio ao backtest
+    # 9) seleção para backtest
     selected = _data_editor_selection(
         filtered[["Symbol", "Price", "D1%", "D5%", "M1%", "M6%", "Y1%", "VolAnn%", "AvgVol", "RSI14", "TrendUp", "Score"]]
     )
@@ -402,3 +404,7 @@ def main() -> None:
             st.success("Seleção enviada. Abra a página **Backtest** para usar os ativos.")
     with col2:
         st.caption("A seleção fica disponível em `st.session_state['screener_selected']`.")
+
+
+if __name__ == "__main__":
+    main()
