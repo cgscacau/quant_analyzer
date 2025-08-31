@@ -6,17 +6,20 @@ from core.ui import app_header, ticker_selector
 from core.data import load_watchlists, download_bulk
 from core.indicators import sma, rsi
 # --- Watchlists (fonte única + debug) ---------------------------------------
-import time
 from core.data import load_watchlists
+
 wl = load_watchlists()
-ver = st.session_state.get("watchlists_version", 0)
-using_override = "watchlists_override" in st.session_state
+
+# versão para quebrar caches quando você atualiza as watchlists na Settings
+ver: int = int(st.session_state.get("watchlists_version", 0))
+
 st.caption(
-    f"Watchlists: {'override (memória)' if using_override else 'arquivo'} • v{int(ver)} • "
-    f"BR:{len(wl.get('BR_STOCKS',[]))} | FIIs:{len(wl.get('BR_FIIS',[]))} | "
+    f"Watchlists: {'override (memória)' if 'watchlists_override' in st.session_state else 'arquivo'} "
+    f"• v{ver} • BR:{len(wl.get('BR_STOCKS',[]))} | FIIs:{len(wl.get('BR_FIIS',[]))} | "
     f"BR Div:{len(wl.get('BR_DIVIDEND',[]))} | US:{len(wl.get('US_STOCKS',[]))} | "
     f"Cripto:{len(wl.get('CRYPTO',[]))}"
 )
+
 
 CLASS_MAP = {
     "Brasil (Ações B3)":   wl.get("BR_STOCKS", []),
