@@ -6,6 +6,20 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+
+def _flatten_col(c) -> str:
+    """Converte nomes de coluna em string plana.
+    - Se for tuple (MultiIndex), pega a última parte não vazia.
+    - Caso contrário, devolve str(c).
+    """
+    if isinstance(c, tuple):
+        for part in reversed(c):
+            if isinstance(part, str) and part.strip():
+                return part
+        return "_".join(str(p) for p in c)  # fallback
+    return str(c)
+
+
 # ============================================================
 # Tentamos usar utilidades internas do projeto (se existirem)
 # ============================================================
@@ -256,17 +270,21 @@ for sym in symbols:
     if df is None or df.empty:
         continue
 
-    # Padroniza nomes e garante índice como datetime
-    cols = {c.lower(): c for c in df.columns}
-    for need in ["open", "high", "low", "close", "adj close", "volume"]:
-        if need not in cols:
-            # se faltou alguma coluna essencial, pula
-            continue
+    # --------- Padroniza nomes e garante índice como datetime (robusto p/ MultiIndex) ---------
+    raw_names = [_flatten_col(c) for c in df.columns]                 # nomes "planos" (strings)
+    cols_map  = {n.lower(): c for n, c in zip(raw_names, df.columns)} # lookup: nome plano -> coluna original
+    
+    # Se possível, renomeia p/ nomes canônicos (Open/High/Low/Close/Adj Close/Volume)
+    canon = ["open", "high", "low", "close", "adj close", "volume"]
+    rename_map = {cols_map[k]: k.title() for k in canon if k in cols_map}
+    if rename_map:
+        df = df.rename(columns=rename_map)
+    
+    # Depois disso, garante que df.columns são strings simples e "bonitas"
     df = df.copy()
-    df.columns = [c.title() for c in df.columns]
-    df = df.dropna(how="all")
-    if df.empty:
-        continue
+    df.columns = [_flatten_col(c).title() for c in df.columns]
+    # -------------------------------------------------------------------------------------------
+
 
     close = pd.to_numeric(df.get("Adj Close", df.get("Close")), errors="coerce")
     vol = pd.to_numeric(df.get("Volume"), errors="coerce")
