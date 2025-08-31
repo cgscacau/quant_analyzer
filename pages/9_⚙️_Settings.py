@@ -130,6 +130,14 @@ with colC:
 
 st.divider()
 
+if st.button("📥 Usar arquivo **puro** como override (sem filtros)", use_container_width=True):
+    base = read_watchlists_file()              # lê do arquivo (sem reconstrução)
+    st.session_state["watchlists_override"] = base
+    st.session_state["watchlists_version"] = time.time()
+    clear_data_cache()
+    st.success(f"Arquivo aplicado como override. {_fmt_sizes(base)}")
+
+
 # Visualização opcional das listas
 with st.expander("Pré-visualizar listas (origem atual)", expanded=False):
     wl_now = load_watchlists()
