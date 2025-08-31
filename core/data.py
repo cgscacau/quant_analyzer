@@ -147,10 +147,9 @@ def download_history(symbol: str, period: str = "6mo", interval: str = "1d") -> 
 
 @st.cache_data(show_spinner=False)
 def download_bulk(symbols: list[str], period: str, interval: str, ver: int = 0) -> dict[str, pd.DataFrame]:
-    """Baixa dados para vários símbolos. `ver` só serve para invalidar o cache."""
-    if not symbols:
-        return {}
     result: dict[str, pd.DataFrame] = {}
+    if not symbols:
+        return result
     for s in symbols:
         try:
             df = yf.download(s, period=period, interval=interval, progress=False, auto_adjust=False)
