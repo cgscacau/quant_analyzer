@@ -490,8 +490,7 @@ for tab, sym in zip(tabs, equities.keys()):
 # ============================================================
 # ===================== BLOCO FINAL — Resumo e plano tático =====================
 # ---------- Plano tático parametrizado ----------
-import numpy as np
-import streamlit as st
+
 
 def _is_num(x) -> bool:
     try:
