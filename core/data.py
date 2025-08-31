@@ -1,7 +1,12 @@
 # core/data.py
+from __future__ import annotations   # tem que ser a PRIMEIRA linha do arquivo
+import pandas as pd                 # antes de qualquer uso de pd.*
 from pathlib import Path
 import json
 import streamlit as st
+
+
+
 
 # Caminho: <raiz do projeto>/data/watchlists.json
 _WL_FILE = Path(__file__).resolve().parents[1] / "data" / "watchlists.json"
