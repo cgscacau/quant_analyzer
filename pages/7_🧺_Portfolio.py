@@ -35,19 +35,17 @@ def fmt_num(x: float | int | None, ndigits: int = 2) -> str:
     return f"{float(x):.{ndigits}f}"
 
 
-def ann_stats(returns: pd.Series | pd.DataFrame, periods_per_year: int = 252) -> tuple[float, float]:
-    """
-    Anualiza média e desvio de retornos.
-    Se receber DataFrame, usa a média por linha como fallback (não altera o uso no restante do código).
-    """
-    if isinstance(returns, pd.DataFrame):
-        sr = returns.mean(axis=1)           # fallback seguro
-    else:
-        sr = returns
-
-    mu = float(sr.mean() * periods_per_year)
-    vol = float(sr.std(ddof=0) * (periods_per_year ** 0.5))
-    return mu, vol
+# ------------------------------------------------------------
+# 1) Estatísticas anuais robustas (aceita Series/array/vazio)
+# ------------------------------------------------------------
+def ann_stats(ret_series, periods_per_year: int = 252):
+    r = pd.Series(ret_series).dropna().astype(float)
+    if len(r) < 2:               # nada para medir
+        return np.nan, np.nan, np.nan
+    mu = r.mean() * periods_per_year
+    vol = r.std(ddof=1) * np.sqrt(periods_per_year)
+    sh  = mu / vol if vol and np.isfinite(vol) and vol > 0 else np.nan
+    return float(mu), float(vol), float(sh)
 
 
 
@@ -398,44 +396,77 @@ def series_from_weights(rets: pd.DataFrame,
     r = pd.Series(r, index=rets.index)
     return r.dropna()
 
-def portfolio_table_row(name: str,
-                        w: np.ndarray,
+# ---------------------------------------------------------------------
+# 2) Linha da tabela de portfólio com alinhamento e normalização robustos
+#    label  : nome a mostrar
+#    w      : pesos (dict | Series | ndarray)
+#    rets   : DataFrame de retornos (colunas = símbolos)
+#    cols_ref: ordem/seleção de colunas usada para gerar os pesos
+# ---------------------------------------------------------------------
+def portfolio_table_row(label: str,
+                        w,
                         rets: pd.DataFrame,
-                        cols_ref: list[str] | None = None):
-    """
-    Monta uma linha com (nome, mu, vol, sharpe, pesos_por_ativo)
-    alinhando pesos às colunas e garantindo robustez.
-    """
-    r = series_from_weights(rets, w, cols_ref)
-    if r.empty:
-        return {
-            "Carteira": name,
-            "Retorno anual": np.nan,
-            "Vol anual": np.nan,
-            "Sharpe": np.nan,
-            "Pesos": None,
-        }
+                        cols_ref: list[str]) -> list:
+    # Apenas colunas numéricas e que existem no DF
+    rets = rets.select_dtypes(include=[np.number]).copy()
+    cols = [c for c in cols_ref if c in rets.columns]
 
+    if len(cols) == 0 or rets.empty:
+        return [label, np.nan, np.nan, np.nan, {}]
+
+    # --------------------
+    # Monta vetor de pesos
+    # --------------------
+    if isinstance(w, dict):
+        w_vec = pd.Series(w, dtype=float).reindex(cols).fillna(0.0).to_numpy()
+    elif isinstance(w, pd.Series):
+        w_vec = w.reindex(cols).astype(float).fillna(0.0).to_numpy()
+    else:
+        w_arr = np.asarray(w, dtype=float).reshape(-1)
+        if w_arr.size == len(cols):
+            w_vec = w_arr
+        else:
+            # Se tiver um índice, tenta alinhar por ele
+            if hasattr(w, "index"):
+                try:
+                    w_vec = pd.Series(w_arr, index=list(getattr(w, "index"))
+                                      ).reindex(cols).fillna(0.0).to_numpy()
+                except Exception:
+                    # fallback: corta/preenche com zero
+                    w_vec = np.zeros(len(cols), dtype=float)
+                    n = min(len(cols), w_arr.size)
+                    if n > 0:
+                        w_vec[:n] = w_arr[:n]
+            else:
+                # fallback: corta/preenche com zero
+                w_vec = np.zeros(len(cols), dtype=float)
+                n = min(len(cols), w_arr.size)
+                if n > 0:
+                    w_vec[:n] = w_arr[:n]
+
+    # Normaliza (garante soma = 1 se possível)
+    s = float(np.nansum(w_vec))
+    if not np.isfinite(s) or abs(s) < 1e-12:
+        w_vec = np.zeros_like(w_vec)
+    else:
+        w_vec = w_vec / s
+
+    # ----------------------------
+    # Retorno da carteira (T x 1)
+    # ----------------------------
+    R = rets[cols].to_numpy(dtype=float)       # (T, N)
+    r = R @ w_vec                              # (T,)
+    r = pd.Series(r, index=rets.index).dropna()
+
+    # ----------------------------
+    # Estatísticas anuais
+    # ----------------------------
     mu, vol, sh = ann_stats(r)
-    # pesos normalizados e alinhados para exibir no tooltip/tabela
-    cols = list(cols_ref) if cols_ref is not None else list(rets.columns)
-    cols = [c for c in cols if c in rets.columns]
-    w = np.asarray(w, dtype=float).flatten()
-    n = min(len(w), len(cols))
-    w = np.clip(w[:n], 0, 1)
-    if w.sum() > 0:
-        w = w / w.sum()
-    pesos_dict = dict(zip(cols[:n], w.tolist()))
 
-    return {
-        "Carteira": name,
-        "Retorno anual": mu,
-        "Vol anual": vol,
-        "Sharpe": sh,
-        "Pesos": pesos_dict,
-    }
+    # Dicionário de pesos (limpa números muito pequenos)
+    weights_dict = {c: float(x) for c, x in zip(cols, w_vec) if abs(x) > 1e-6}
 
-
+    return [label, mu, vol, sh, weights_dict]
 
 # -------------------------------------------------------
 # 1) Pegue o DataFrame de retornos que foi usado no MC
