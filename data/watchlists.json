@@ -40,13 +40,16 @@
   "BR_SMALL_CAPS": [
     "PETZ3.SA","MGLU3.SA","COGN3.SA","YDUQ3.SA","IRBR3.SA","MULT3.SA","MRVE3.SA","CYRE3.SA","EZTC3.SA","ENJU3.SA"
   ],
-  "US_DIVIDEND": [
-    "KO","PG","JNJ","PEP","XOM","CVX","MCD","PFE","MRK","WMT","T","VZ","MO","UPS","HD","ABBV","CL","KMB","V","MA"
+   "US_DIVIDEND_EXTENDED": [
+    "KO","PG","JNJ","PEP","XOM","CVX","MCD","PFE","MRK","WMT", "T","VZ","MO","UPS","HD","ABBV","CL","KMB","MDT","TGT",
+    "ABT","AFL","ADM","CLX","DOV","GPC","LIN","NEE","SPGI","O","PPG","ED","FRT"
   ],
-  "US_BLUE_CHIPS": [
-    "AAPL","MSFT","NVDA","AMZN","GOOGL","META","BRK-B","JPM","LLY","UNH"
+  "US_BLUE_CHIPS_EXTENDED": [
+    "AAPL","MSFT","NVDA","AMZN","GOOGL","META","BRK-B","JPM","LLY","UNH", "ABT","ABBV","ACN","ADBE","AMD","AMGN","AIG","AXP","BA","BAC","BK",
+    "BKNG","BLK","BMY","C","CMCSA","COF","COP","COST","CRM","CVS","DHR", "DIS","DUK","FDX","GD","GE","GILD","GM","GS","HON","INTC","MDLZ",
+    "MET","MMM","PM","PYPL","SBUX","SO","SPG","TMUS","UNP","USB","WFC"
   ],
-  "US_SMALL_CAPS": [
-    "NET","ZS","OKTA","DDOG","CRWD","MDB","SNOW","ROKU","PATH","PLTR"
+  "US_SMALL_CAPS_EXTENDED": [
+    "NET","ZS","OKTA","DDOG","CRWD","MDB","SNOW","ROKU","PATH","PLTR", "AAP","ABM","ABR","ARC","ACAD","ACIA","KFY","KREF","KRYS","KSS","CNT","KTOS","KW","QUA","LEN"
   ]
 }
