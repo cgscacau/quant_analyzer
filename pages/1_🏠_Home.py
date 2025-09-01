@@ -252,3 +252,180 @@ with tabs[1]:
 
     st.info("**Dica:** comece com `Log-return`, lookback 60, H 10–20, Teste 20%, Val 10%, todos os modelos em 'Rápido'. Se gostar do resultado, rode 'Completo' para refinar.")
 
+
+# ---- Home com manuais (Neural Forecast + ML Models) ----
+import streamlit as st
+
+try:
+    from core.ui import app_header
+    _has_app_header = True
+except Exception:
+    _has_app_header = False
+
+st.set_page_config(page_title="Home", page_icon="🏠", layout="wide")
+(app_header("🏠 Home", "Visão geral e manuais") if _has_app_header else st.title("🏠 Home"))
+
+tabs = st.tabs(["📌 Introdução", "🧠 Manual — Neural Forecast", "🤖 Manual — ML Models"])
+
+# -------------------------------------------------------------------
+# Introdução (igual à anterior)
+# -------------------------------------------------------------------
+with tabs[0]:
+    st.markdown("""
+**Bem-vindo!** Aqui você encontra os manuais das páginas do app.
+Use as abas **Neural Forecast** e **ML Models** para guias detalhados.
+""")
+
+# -------------------------------------------------------------------
+# Manual Neural Forecast (idêntico ao que enviei antes)
+# -------------------------------------------------------------------
+with tabs[1]:
+    st.markdown("# 🧠 Manual — Neural Forecast")
+    st.caption("Previsão multi-modelo (MLP, LSTM, GRU, CNN-1D, TCN, Transformer) + avaliação no teste + projeção H passos com incerteza via MC Dropout.")
+    st.markdown("## 1) O que esta página faz")
+    st.markdown("""
+- Baixa **OHLCV** do ticker (Yahoo).  
+- Constrói **features** (retornos, médias, RSI, volatilidade, etc.).  
+- Separa dados em **Treino → Validação → Teste** (ordem temporal, sem shuffle).  
+- Treina os modelos selecionados.  
+- Compara no **Teste** (MAE, RMSE, MAPE, direcional).  
+- Projeta o futuro por **H passos** com **MC Dropout**, gerando **fan chart** (P5…P95) e **P(Δ>0)** por horizonte.
+""")
+    with st.expander("### 2) Entendendo cada controle", expanded=True):
+        st.markdown("""
+- **Ticker / Período / Intervalo**  
+- **Alvo**: **Log-return** (recomendado) ou **Close (nível)**  
+- **Lookback**, **Horizonte (H)**, **Teste/Val**, **Modelos**, **Modo de treino**, **MC Dropout**, **Seed**
+""")
+    with st.expander("### 3) Pipeline de dados e treino (o que rola nos bastidores)"):
+        st.markdown("""
+Pré-processamento → Features → Split temporal → Normalização (fit no treino) → Janelas (L) → Treino (EarlyStopping) → Backtest 1-passso → Projeção com MC Dropout.
+""")
+    with st.expander("### 4) Como interpretar", expanded=True):
+        st.markdown("""
+Faixas TREINO/VAL/TESTE, tabela de métricas (RMSE/MAE/MAPE/direcional), fan chart (P5–P95) e curva P(Δ>0) por horizonte.
+""")
+    with st.expander("### 5) Receitas rápidas"):
+        st.markdown("""
+**Diário:** Log-return, L=60, H=10–20, Teste=0.20, Val=0.10, todos os modelos, Modo=Rápido, MC=100.  
+**Intraday:** L=120–240, H=8–16, MC=150–300.
+""")
+    with st.expander("### 6) Boas práticas de risco"):
+        st.markdown("""
+Use **P25/P5** para calibrar stops/sizing; **P50** para alvo. Re-treine quando o mercado fugir do leque.
+""")
+    with st.expander("### 7) Limitações"):
+        st.markdown("""
+Métricas do teste refletem um período; MC Dropout não cobre todos os riscos.
+""")
+    with st.expander("### 8) Troubleshooting"):
+        st.markdown("""
+`tabulate` ausente → adicione no requirements;  
+`UnhashableParamError` → não cachear funções com `numpy.ndarray`;  
+TCN (Add shapes) → alinhar canais com `Conv1D(64,1)`;  
+TensorFlow ausente → instale a variante correta.
+""")
+    st.info("Dica: comece com Log-return, L=60, H=10–20, Teste 20%, Val 10%, todos os modelos em 'Rápido'.")
+
+# -------------------------------------------------------------------
+# 🤖 Manual — ML Models (NOVO)
+# -------------------------------------------------------------------
+with tabs[2]:
+    st.markdown("# 🤖 Manual — ML Models")
+    st.caption("Classificação para direção/retorno: comparação de modelos, ajuste de limiar (threshold) e impacto em estratégia (CAGR/Sharpe/MaxDD).")
+
+    st.markdown("## 1) O que esta página faz")
+    st.markdown("""
+- Treina **modelos clássicos de ML** (ex.: Regressão Logística, Árvores/Florestas, Gradiente, SVM, etc. dependendo do seu setup) para **classificar** se o próximo movimento/horizonte vai **subir** (classe 1) ou **não subir** (classe 0).  
+- Calcula **probabilidade p = P(alta)** para cada barra no **Teste**.  
+- Mostra **métricas de classificação** (Accuracy, Precision, Recall, F1, ROC_AUC) por ativo e, **com um limiar** (ex.: `prob ≥ 0.55`), simula a **estratégia** (comprar quando p ≥ limiar) e exibe **CAGR, Sharpe e MaxDD** + **curva de equity**.
+""")
+
+    st.markdown("## 2) Pipeline (visão rápida)")
+    st.markdown("""
+1. **Label** (alvo) é gerado (ex.: `y=1` se retorno t+1 > 0; `y=0` caso contrário — ou um horizonte maior, conforme a página).  
+2. **Features** (retornos, médias, volatilidade, RSI, etc.) são criadas **antes** do ponto a ser previsto (para evitar *leakage*).  
+3. **Split temporal**: Treino → Validação (opcional) → Teste (segura para avaliar).  
+4. **Treino** dos modelos + **calibração** (se houver) e **threshold tuning** (se a página permitir).  
+5. **Teste**: gera `p = P(y=1)`; com **`prob ≥ limiar`** vira sinal de entrada e é simulada a estratégia.
+""")
+
+    with st.expander("### 3) Controles típicos da página e melhores práticas", expanded=True):
+        st.markdown("""
+- **Ticker/Período/Intervalo**: defina a amostra temporal.  
+- **Horizonte da etiqueta (label)**: `t+1` (curto) ou `t+k` (swing). Quanto maior **k**, mais difícil o problema → peça features mais lentas (médias longas, tendências).  
+- **Balanceamento de classes**: se muitos `0` e poucos `1`, considere `class_weight='balanced'` (quando disponível) ou *undersampling/oversampling* no treino.  
+- **Validação**: quando a página oferece, use a **Val** para escolher limiar/modelo e deixe o **Teste** intocado para a avaliação final.  
+- **Calibração de probabilidade**: Platt/Isotonic (se disponível) melhora a **calibração** e torna o threshold mais estável.
+""")
+
+    with st.expander("### 4) Como ler a tabela de métricas (Modelo → OOF/Teste)", expanded=True):
+        st.markdown("""
+- **Accuracy**: % de acertos totais — **cai em dados desbalanceados**.  
+- **Precision** (entre os que o modelo chamou de alta, quantos realmente subiram) → bom p/ evitar *falsos positivos*.  
+- **Recall** (entre os que subiriam, quantos o modelo pegou) → bom p/ capturar movimentos.  
+- **F1**: harmônica de precision/recall (equilibra os dois).  
+- **ROC_AUC**: área sob a ROC; mede separação de classes **independente de limiar**.  
+> **Dica**: Compare modelos pelo **ROC_AUC/F1** e **depois** ajuste o **limiar** pensando na sua estratégia (mais precisão vs. mais recall).
+""")
+
+    with st.expander("### 5) Limiar (threshold) → Probabilidade em Sinal", expanded=True):
+        st.markdown("""
+- O gráfico/tabela de **desempenho da estratégia** usa `SINAL = 1 se p ≥ limiar`.  
+- **Limiar baixo** (ex.: 0.50) → **mais trades**, maior *recall* e giro; **limiar alto** (ex.: 0.60–0.70) → menos trades, maior *precision*.  
+- Ajuste **olhando as métricas do modelo E os KPIs da estratégia** (**CAGR/Sharpe/MaxDD**).  
+- **Cuidado com overfitting de limiar**:  
+  - Se existir **Validação**, ajuste o limiar nela e **congele** para o Teste.  
+  - Se não, prefira limiares redondos e teste robustez (ex.: 0.52, 0.55, 0.58).
+""")
+
+    with st.expander("### 6) Estratégia e curva de patrimônio", expanded=True):
+        st.markdown("""
+- Estratégia típica: **comprar 1 unidade** quando `p ≥ limiar` e **ficar fora** caso contrário (ou zerar posição).  
+- **Custos**: se a página permitir parametrizar *bps* (custos por rebalance), preencha — isso muda muito o Sharpe.  
+- **KPIs**:  
+  - **CAGR**: taxa de crescimento anual composta do patrimônio.  
+  - **Sharpe**: retorno excedente / vol; robusto quando custos são realistas.  
+  - **MaxDD**: pior *drawdown*; crítico para sizing.  
+- Use a curva para ver **consistência temporal**: degraus muito serrilhados podem indicar **giro alto** (cuidado com custos).
+""")
+
+    with st.expander("### 7) Receitas rápidas"):
+        st.markdown("""
+**Diário curto (t+1):** features curtas (retornos, RSI 14, vol 20), **LogReg/Árvore/RandomForest**; threshold de início em **0.55**.  
+**Swing (t+5/t+10):** adicione médias longas (SMA/EMA 50–200), *momentum* (ROC), **Gradient Boosting/XGBoost** (se disponível); comece com **0.60**.  
+**Cripto 24/7:** dados ruidosos/desbalanceados → **class_weight** ou resampling; thresholds **0.55–0.65**; revise **custos**.
+""")
+
+    with st.expander("### 8) Boas práticas e armadilhas", expanded=True):
+        st.markdown("""
+- **Leakage**: garanta que features **não usam dados do futuro** (médias/indicadores devem ser calculados corretamente).  
+- **Data snooping**: não escolha limiar/modelo usando o Teste; use Validação quando houver.  
+- **Instabilidade de threshold**: prefira faixas (0.55±0.02) em vez de ponto fino.  
+- **Alta AUC, PnL ruim?** Calibre probabilidade (Platt/Isotonic), aumente custos realistas, verifique giro e *timing*.  
+- **Poucos trades**: limiar alto demais; reduza limiar ou aumente horizonte/feature que gere mais confiança.  
+- **Muitos falsos positivos**: aumente limiar, troque para um modelo com **maior precision** ou melhore features.
+""")
+
+    with st.expander("### 9) Checklist rápido para sua rodada"):
+        st.markdown("""
+1) Defina horizonte do label (t+1, t+5…).  
+2) Gere features SEM leak.  
+3) Faça split temporal (Treino/Val/Teste).  
+4) Compare modelos por ROC_AUC/F1.  
+5) Ajuste limiar na **Validação** (se houver).  
+6) Avalie estratégia no **Teste** com custos realistas.  
+7) Re-treine periodicamente.
+""")
+
+    with st.expander("### 10) Troubleshooting"):
+        st.markdown("""
+- **Métricas ok, equity ruim** → custos, giro, threshold/overfitting, probabilidade descalibrada.  
+- **Modelo sempre prevê 0** → desbalanceamento; use `class_weight`/resampling/limiar baixo.  
+- **Oscila muito a cada execução** → fixe **Seed**, aumente janela/área de treino.  
+- **Resultados “bons demais”** → suspeite de *leakage*.
+""")
+
+    st.success("Dica: escolha o **modelo pelo ROC_AUC/F1**, depois ajuste o **limiar** pensando no **CAGR/Sharpe/MaxDD** com custos realistas. Evite “caçar” threshold no Teste.")
+
+
